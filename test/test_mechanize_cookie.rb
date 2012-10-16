@@ -196,15 +196,22 @@ class TestMechanizeCookie < Mechanize::TestCase
       "name=Aaron; Domain=localhost; Expires=Sun, 06 Nov 2011 00:29:51 GMT; Path=/, " \
       "name=Aaron; Domain=localhost; Expires=Sun, 06 Nov 2011 00:29:51 GMT; Path=/, " \
       "name=Aaron; Domain=localhost; Expires=Sun, 06 Nov 2011 00:29:51 GMT; Path=/; HttpOnly, " \
+      "nojs=NoJS; Domain=localhost; Path=/; HttpOnly, " \
       "expired=doh; Expires=Fri, 04 Nov 2011 00:29:51 GMT; Path=/, " \
       "a_path=some_path; Expires=Sun, 06 Nov 2011 00:29:51 GMT; Path=/some_path, " \
       "no_path=no_path; Expires=Sun, 06 Nov 2011 00:29:51 GMT, no_expires=nope; Path=/"
 
     cookies = Mechanize::Cookie.parse url, cookie_str
-    assert_equal 8, cookies.length
+    assert_equal 9, cookies.length
 
     name = cookies.find { |c| c.name == 'name' }
     assert_equal "Aaron",             name.value
+    assert_equal "/",                 name.path
+    assert_equal Time.at(1320539391), name.expires
+
+    nojs = cookies.find { |c| c.name == 'nojs' }
+    assert_equal "NoJS", nojs.value
+    assert_equal true,   nojs.http_only?
     assert_equal "/",                 name.path
     assert_equal Time.at(1320539391), name.expires
 

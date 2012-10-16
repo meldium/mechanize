@@ -6,7 +6,7 @@ require 'domain_name'
 class Mechanize::Cookie
   attr_reader :name
   attr_accessor :value, :version
-  attr_accessor :domain, :path, :secure
+  attr_accessor :domain, :path, :secure, :http_only
   attr_accessor :comment, :max_age
 
   attr_accessor :session
@@ -32,7 +32,7 @@ class Mechanize::Cookie
   def initialize(*args)
     @version = 0     # Netscape Cookie
 
-    @domain = @path = @secure = @comment = @max_age =
+    @domain = @path = @secure = @http_only = @comment = @max_age =
       @expires = @comment_url = @discard = @port = nil
 
     @created_at = @accessed_at = Time.now
@@ -135,12 +135,15 @@ class Mechanize::Cookie
             end
           when 'secure'
             cookie.secure = true
+          when 'httponly'
+            cookie.http_only = true
           end
         end
 
-        cookie.path    ||= (uri + './').path
-        cookie.secure  ||= false
-        cookie.domain  ||= uri.host
+        cookie.path      ||= (uri + './').path
+        cookie.secure    ||= false
+        cookie.http_only ||= false
+        cookie.domain    ||= uri.host
         # Move this in to the cookie jar
         yield cookie if block_given?
 
@@ -187,6 +190,7 @@ class Mechanize::Cookie
   end
 
   alias secure? secure
+  alias http_only? http_only
 
   def acceptable_from_uri?(uri)
     host = DomainName.new(uri.host)
