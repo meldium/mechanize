@@ -132,7 +132,7 @@ class TestMechanizeCookie < Mechanize::TestCase
   def test_parse_date_fail
     url = URI.parse('http://localhost/')
 
-    dates = [ 
+    dates = [
               "20/06/95 21:07",
     ]
 
@@ -236,7 +236,7 @@ class TestMechanizeCookie < Mechanize::TestCase
     cookie_value = '12345%7D=ASDFWEE345%3DASda'
 
     expires = Time.parse('Sun, 27-Sep-2037 00:00:00 GMT')
-    
+
     cookie_params.keys.combine.each do |c|
       cookie_text = "#{cookie_value}; "
       c.each_with_index do |key, idx|
@@ -271,7 +271,7 @@ class TestMechanizeCookie < Mechanize::TestCase
     cookie_value = '12345%7D='
 
     expires = Time.parse('Sun, 27-Sep-2037 00:00:00 GMT')
-    
+
     cookie_params.keys.combine.each do |c|
       cookie_text = "#{cookie_value}; "
       c.each_with_index do |key, idx|
@@ -308,7 +308,7 @@ class TestMechanizeCookie < Mechanize::TestCase
     cookie_value = '12345%7D=ASDFWEE345%3DASda'
 
     expires = Time.parse('Sun, 27-Sep-2037 00:00:00 GMT')
-    
+
     cookie_params.keys.combine.each do |c|
       next if c.find { |k| k == 'path' }
       cookie_text = "#{cookie_value}; "
@@ -345,7 +345,7 @@ class TestMechanizeCookie < Mechanize::TestCase
     cookie_value = '12345%7D=ASDFWEE345%3DASda'
 
     expires = Time.parse('Sun, 27-Sep-2037 00:00:00 GMT')
-    
+
     cookie_params.keys.combine.each do |c|
       next unless c.find { |k| k == 'secure' }
       cookie_text = "#{cookie_value}; "
@@ -382,7 +382,7 @@ class TestMechanizeCookie < Mechanize::TestCase
     cookie_value = '12345%7D=ASDFWEE345%3DASda'
 
     expires = Time.parse('Sun, 27-Sep-2037 00:00:00 GMT')
-    
+
     cookie_params.keys.combine.each do |c|
       cookie_text = "#{cookie_value};"
       c.each_with_index do |key, idx|
@@ -448,4 +448,3 @@ class TestMechanizeCookie < Mechanize::TestCase
     assert 'example.com', cookie.domain
   end
 end
-
