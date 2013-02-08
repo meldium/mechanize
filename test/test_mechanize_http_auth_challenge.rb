@@ -35,5 +35,15 @@ class TestMechanizeHttpAuthChallenge < Mechanize::TestCase
     assert_equal 'unknown HTTP authentication scheme Unknown', e.message
   end
 
+  def test_realm_name
+    assert_equal 'r', @challenge.realm_name
+  end
+
+  def test_realm_name_ntlm
+    challenge = @AC.new 'Negotiate, NTLM'
+
+    assert_nil challenge.realm_name
+  end
+
 end
 

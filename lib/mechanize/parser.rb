@@ -113,7 +113,7 @@ module Mechanize::Parser
       content_disposition =
         Mechanize::HTTP::ContentDispositionParser.parse disposition
 
-      if content_disposition then
+      if content_disposition && content_disposition.filename then
         filename = content_disposition.filename
         filename = filename.split(/[\\\/]/).last
         handled = true
@@ -157,12 +157,12 @@ module Mechanize::Parser
   # Finds a free filename based on +filename+, but is not race-free
 
   def find_free_name filename
-    filename = @filename unless filename
+    base_filename = filename ||= @filename
 
     number = 1
 
     while File.exist? filename do
-      filename = "#{@filename}.#{number}"
+      filename = "#{base_filename}.#{number}"
       number += 1
     end
 

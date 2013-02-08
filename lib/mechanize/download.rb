@@ -10,6 +10,12 @@ class Mechanize::Download
   include Mechanize::Parser
 
   ##
+  # The filename for this file based on the content-disposition of the
+  # response or the basename of the URL
+
+  attr_accessor :filename
+
+  ##
   # Accessor for the IO-like that contains the body
 
   attr_reader :body_io
@@ -35,6 +41,15 @@ class Mechanize::Download
   end
 
   ##
+  # The body of this response as a String.
+  #
+  # Take care, this may use lots of memory if the response body is large.
+
+  def body
+    @body_io.read.tap { @body_io.rewind }
+  end
+
+  ##
   # Saves a copy of the body_io to +filename+
 
   def save filename = nil
@@ -43,15 +58,10 @@ class Mechanize::Download
     dirname = File.dirname filename
     FileUtils.mkdir_p dirname
 
-    # Ruby 1.8.7 implements StringIO#path, can't use respond_to? :path
-    if StringIO === @body_io then
-      open filename, 'wb' do |io|
-        until @body_io.eof? do
-          io.write @body_io.read 16384
-        end
+    open filename, 'wb' do |io|
+      until @body_io.eof? do
+        io.write @body_io.read 16384
       end
-    else
-      FileUtils.mv @body_io.path, filename
     end
   end
 

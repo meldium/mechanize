@@ -28,6 +28,11 @@ class Mechanize::HTTP::WWWAuthenticateParser
       challenge = Mechanize::HTTP::AuthChallenge.new
 
       scheme = auth_scheme
+
+      if scheme == 'Negotiate'
+        scan_comma_spaces
+      end
+
       next unless scheme
       challenge.scheme = scheme
 
@@ -40,6 +45,8 @@ class Mechanize::HTTP::WWWAuthenticateParser
 
         challenges << challenge
         next
+      else
+        scheme.capitalize!
       end
 
       next unless space
@@ -49,6 +56,8 @@ class Mechanize::HTTP::WWWAuthenticateParser
       while true do
         pos = @scanner.pos
         name, value = auth_param
+
+        name.downcase! if name =~ /^realm$/i
 
         unless name then
           challenge.params = params
@@ -80,6 +89,15 @@ class Mechanize::HTTP::WWWAuthenticateParser
 
   def spaces
     @scanner.scan(/ +/)
+  end
+
+  ##
+  # scans a comma followed by spaces
+  # needed for Negotiation, NTLM
+  #
+
+  def scan_comma_spaces
+    @scanner.scan(/, +/)
   end
 
   ##

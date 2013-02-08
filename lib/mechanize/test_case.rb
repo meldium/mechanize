@@ -14,10 +14,28 @@ end
 
 require 'minitest/autorun'
 
+##
+# A generic test case for testing mechanize.  Using a subclass of
+# Mechanize::TestCase for your tests will create an isolated mechanize
+# instance that won't pollute your filesystem or other tests.
+#
+# Once Mechanize::TestCase is loaded no HTTP requests will be made outside
+# mechanize itself.  All requests are handled via WEBrick servlets.
+#
+# Mechanize uses WEBrick servlets to test some functionality.  You can run
+# other HTTP clients against the servlets using:
+#
+#   ruby -rmechanize/test_case/server -e0
+#
+# Which will launch a test server at http://localhost:8000
+
 class Mechanize::TestCase < MiniTest::Unit::TestCase
 
   TEST_DIR = File.expand_path '../../../test', __FILE__
   REQUESTS = []
+
+  ##
+  # Creates a clean mechanize instance +@mech+ for use in tests.
 
   def setup
     super
@@ -27,6 +45,10 @@ class Mechanize::TestCase < MiniTest::Unit::TestCase
     @ssl_private_key = nil
     @ssl_certificate = nil
   end
+
+  ##
+  # Creates a fake page with URI http://fake.example and an empty, submittable
+  # form.
 
   def fake_page agent = @mech
     uri = URI 'http://fake.example/'
@@ -38,19 +60,26 @@ class Mechanize::TestCase < MiniTest::Unit::TestCase
 </html>
     END
 
-    response = { 'content-type' => 'text/html' }
-
-    Mechanize::Page.new uri, response, html, 200, agent
+    Mechanize::Page.new uri, nil, html, 200, agent
   end
+
+  ##
+  # Is the Encoding constant defined?
 
   def have_encoding?
     Object.const_defined? :Encoding
   end
 
+  ##
+  # Creates a Mechanize::Page with the given +body+
+
   def html_page body
     uri = URI 'http://example/'
-    Mechanize::Page.new uri, { 'content-type' => 'text/html' }, body, 200, @mech
+    Mechanize::Page.new uri, nil, body, 200, @mech
   end
+
+  ##
+  # Runs the block inside a temporary directory
 
   def in_tmpdir
     Dir.mktmpdir do |dir|
@@ -59,6 +88,9 @@ class Mechanize::TestCase < MiniTest::Unit::TestCase
       end
     end
   end
+
+  ##
+  # Creates a Nokogiri Node +element+ with the given +attributes+
 
   def node element, attributes = {}
     doc = Nokogiri::HTML::Document.new
@@ -72,6 +104,10 @@ class Mechanize::TestCase < MiniTest::Unit::TestCase
     node
   end
 
+  ##
+  # Creates a Mechanize::Page for the given +uri+ with the given
+  # +content_type+, response +body+ and HTTP status +code+
+
   def page uri, content_type = 'text/html', body = '', code = 200
     uri = URI uri unless URI::Generic === uri
 
@@ -79,9 +115,15 @@ class Mechanize::TestCase < MiniTest::Unit::TestCase
                         @mech)
   end
 
+  ##
+  # Requests made during this tests
+
   def requests
     REQUESTS
   end
+
+  ##
+  # An SSL private key.  This key is the same across all test runs
 
   def ssl_private_key
     @ssl_private_key ||= OpenSSL::PKey::RSA.new <<-KEY
@@ -93,6 +135,9 @@ p80joKOug2UUgqOLD2GUSO//AiEA9ssY6AFxjHWuwo/+/rkLmkfO2s1Lz3OeUEWq
 -----END RSA PRIVATE KEY-----
     KEY
   end
+
+  ##
+  # An X509 certificate.  This certificate is the same across all test runs
 
   def ssl_certificate
     @ssl_certificate ||= OpenSSL::X509::Certificate.new <<-CERT
@@ -108,438 +153,32 @@ UQIBATANBgkqhkiG9w0BAQUFAANBAAAB////////////////////////////////
     CERT
   end
 
-end
+  ##
+  # Creates a Tempfile with +content+ that is immediately unlinked
 
-class BasicAuthServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req,res)
-    htpd = WEBrick::HTTPAuth::Htpasswd.new('dot.htpasswd')
-    htpd.set_passwd('Blah', 'user', 'pass')
-    authenticator = WEBrick::HTTPAuth::BasicAuth.new({
-      :UserDB => htpd,
-      :Realm  => 'Blah',
-      :Logger => Logger.new(nil)
-    }
-                                                    )
-                                                    begin
-                                                      authenticator.authenticate(req,res)
-                                                      res.body = 'You are authenticated'
-                                                    rescue WEBrick::HTTPStatus::Unauthorized
-                                                      res.status = 401
-                                                    end
-                                                    FileUtils.rm('dot.htpasswd')
-  end
-  alias :do_POST :do_GET
-end
+  def tempfile content
+    body_io = Tempfile.new @__name__
+    body_io.unlink
+    body_io.write content
+    body_io.flush
+    body_io.rewind
 
-class ContentTypeServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    ct = req.query['ct'] || "text/html; charset=utf-8"
-    res['Content-Type'] = ct
-    res.body = "Hello World"
-  end
-end
-
-class DigestAuthServlet < WEBrick::HTTPServlet::AbstractServlet
-  htpd = WEBrick::HTTPAuth::Htdigest.new('digest.htpasswd')
-  htpd.set_passwd('Blah', 'user', 'pass')
-  @@authenticator = WEBrick::HTTPAuth::DigestAuth.new({
-    :UserDB => htpd,
-    :Realm  => 'Blah',
-    :Algorithm => 'MD5',
-    :Logger => Logger.new(nil)
-  }
-                                                     )
-                                                     def do_GET(req,res)
-                                                       def req.request_time; Time.now; end
-                                                       def req.request_uri; '/digest_auth'; end
-                                                       def req.request_method; "GET"; end
-
-                                                       begin
-                                                         @@authenticator.authenticate(req,res)
-                                                         res.body = 'You are authenticated'
-                                                       rescue WEBrick::HTTPStatus::Unauthorized
-                                                         res.status = 401
-                                                       end
-                                                       FileUtils.rm('digest.htpasswd') if File.exists?('digest.htpasswd')
-                                                     end
-                                                     alias :do_POST :do_GET
-end
-
-class FileUploadServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_POST(req, res)
-    res.body = req.body
-  end
-end
-
-class FormServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    res.body = "<HTML><body>"
-    req.query.each_key { |k|
-      req.query[k].each_data { |data|
-        res.body << "<a href=\"#\">#{WEBrick::HTTPUtils.unescape(k)}:#{WEBrick::HTTPUtils.unescape(data)}</a><br />"
-      }
-    }
-    res.body << "<div id=\"query\">#{res.query}</div></body></HTML>"
-    res['Content-Type'] = "text/html"
-  end
-
-  def do_POST(req, res)
-    res.body = "<HTML><body>"
-
-    req.query.each_key { |k|
-      req.query[k].each_data { |data|
-        res.body << "<a href=\"#\">#{k}:#{data}</a><br />"
-      }
-    }
-
-    res.body << "<div id=\"query\">#{req.body}</div></body></HTML>"
-    res['Content-Type'] = "text/html"
-  end
-end
-
-class GzipServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    if req['Accept-Encoding'] =~ /gzip/
-      if name = req.query['file'] then
-        open("#{Mechanize::TestCase::TEST_DIR}/htdocs/#{name}", 'r') do |io|
-          string = ""
-          zipped = StringIO.new string, 'w'
-          Zlib::GzipWriter.wrap zipped do |gz|
-            gz.write io.read
-          end
-          res.body = string
-        end
-      else
-        res.body = ''
-      end
-    res['Content-Encoding'] = req['X-ResponseContentEncoding'] || 'gzip'
-    res['Content-Type'] = "text/html"
-    else
-      res.code = 400
-      res.body = 'no gzip'
-    end
-  end
-end
-
-class HeaderServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    res['Content-Type'] = "text/html"
-
-    req.query.each do |x,y|
-      res[x] = y
-    end
-
-    body = ''
-    req.each_header do |k,v|
-      body << "#{k}|#{v}\n"
-    end
-    res.body = body
-  end
-end
-
-class HttpRefreshServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    res['Content-Type'] = req.query['ct'] || "text/html"
-    refresh_time = req.query['refresh_time'] || 0
-    refresh_url = req.query['refresh_url'] || '/index.html'
-    res['Refresh'] = " #{refresh_time};url=#{refresh_url}\r\n";
-  end
-end
-
-class InfiniteRedirectServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    res['Content-Type'] = req.query['ct'] || "text/html"
-    res.status = req.query['code'] ? req.query['code'].to_i : '302'
-    number = req.query['q'] ? req.query['q'].to_i : 0
-    res['Location'] = "/infinite_redirect?q=#{number + 1}"
-  end
-  alias :do_POST :do_GET
-end
-
-class InfiniteRefreshServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    res['Content-Type'] = req.query['ct'] || "text/html"
-    res.status = req.query['code'] ? req.query['code'].to_i : '302'
-    number = req.query['q'] ? req.query['q'].to_i : 0
-    res['Refresh'] = " 0;url=http://localhost/infinite_refresh?q=#{number + 1}\r\n";
-  end
-end
-
-class ManyCookiesAsStringServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    cookies = []
-    name_cookie = WEBrick::Cookie.new("name", "Aaron")
-    name_cookie.path = "/"
-    name_cookie.expires = Time.now + 86400
-    name_cookie.domain = 'localhost'
-    cookies << name_cookie
-    cookies << name_cookie
-    cookies << name_cookie
-    cookies << "#{name_cookie}; HttpOnly"
-
-    expired_cookie = WEBrick::Cookie.new("expired", "doh")
-    expired_cookie.path = "/"
-    expired_cookie.expires = Time.now - 86400
-    cookies << expired_cookie
-
-    different_path_cookie = WEBrick::Cookie.new("a_path", "some_path")
-    different_path_cookie.path = "/some_path"
-    different_path_cookie.expires = Time.now + 86400
-    cookies << different_path_cookie
-
-    no_path_cookie = WEBrick::Cookie.new("no_path", "no_path")
-    no_path_cookie.expires = Time.now + 86400
-    cookies << no_path_cookie
-
-    no_exp_path_cookie = WEBrick::Cookie.new("no_expires", "nope")
-    no_exp_path_cookie.path = "/"
-    cookies << no_exp_path_cookie
-
-    res['Set-Cookie'] = cookies.join(', ')
-
-    res['Content-Type'] = "text/html"
-    res.body = "<html><body>hello</body></html>"
-  end
-end
-
-class ManyCookiesServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    name_cookie = WEBrick::Cookie.new("name", "Aaron")
-    name_cookie.path = "/"
-    name_cookie.expires = Time.now + 86400
-    res.cookies << name_cookie
-    res.cookies << name_cookie
-    res.cookies << name_cookie
-    res.cookies << name_cookie
-
-    expired_cookie = WEBrick::Cookie.new("expired", "doh")
-    expired_cookie.path = "/"
-    expired_cookie.expires = Time.now - 86400
-    res.cookies << expired_cookie
-
-    different_path_cookie = WEBrick::Cookie.new("a_path", "some_path")
-    different_path_cookie.path = "/some_path"
-    different_path_cookie.expires = Time.now + 86400
-    res.cookies << different_path_cookie
-
-    no_path_cookie = WEBrick::Cookie.new("no_path", "no_path")
-    no_path_cookie.expires = Time.now + 86400
-    res.cookies << no_path_cookie
-
-    no_exp_path_cookie = WEBrick::Cookie.new("no_expires", "nope")
-    no_exp_path_cookie.path = "/"
-    res.cookies << no_exp_path_cookie
-
-    res['Content-Type'] = "text/html"
-    res.body = "<html><body>hello</body></html>"
-  end
-end
-
-class ModifiedSinceServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    s_time = 'Fri, 04 May 2001 00:00:38 GMT'
-
-    my_time = Time.parse(s_time)
-
-    if req['If-Modified-Since']
-      your_time = Time.parse(req['If-Modified-Since'])
-      if my_time > your_time
-        res.body = 'This page was updated since you requested'
-      else
-        res.status = 304
-      end
-    else
-      res.body = 'You did not send an If-Modified-Since header'
-    end
-
-    res['Last-Modified'] = s_time
-  end
-end
-
-class NTLMServlet < WEBrick::HTTPServlet::AbstractServlet
-
-  def do_GET(req, res)
-    if req['Authorization'] =~ /^NTLM (.*)/ then
-      authorization = $1.unpack('m*').first
-
-      if authorization =~ /^NTLMSSP\000\001/ then
-        type_2 = 'TlRMTVNTUAACAAAADAAMADAAAAABAoEAASNFZ4mr' \
-          'ze8AAAAAAAAAAGIAYgA8AAAARABPAE0AQQBJAE4A' \
-          'AgAMAEQATwBNAEEASQBOAAEADABTAEUAUgBWAEUA' \
-          'UgAEABQAZABvAG0AYQBpAG4ALgBjAG8AbQADACIA' \
-          'cwBlAHIAdgBlAHIALgBkAG8AbQBhAGkAbgAuAGMA' \
-          'bwBtAAAAAAA='
-
-        res['WWW-Authenticate'] = "NTLM #{type_2}"
-        res.status = 401
-      elsif authorization =~ /^NTLMSSP\000\003/ then
-        res.body = 'ok'
-      else
-        res['WWW-Authenticate'] = 'NTLM'
-        res.status = 401
-      end
-    else
-      res['WWW-Authenticate'] = 'NTLM'
-      res.status = 401
-    end
+    body_io
   end
 
 end
 
-class OneCookieNoSpacesServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    cookie = WEBrick::Cookie.new("foo", "bar")
-    cookie.path = "/"
-    cookie.expires = Time.now + 86400
-    res.cookies << cookie.to_s.gsub(/; /, ';')
-    res['Content-Type'] = "text/html"
-    res.body = "<html><body>hello</body></html>"
-  end
+require 'mechanize/test_case/servlets'
+
+module Net # :nodoc:
 end
 
-class OneCookieServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    cookie = WEBrick::Cookie.new("foo", "bar")
-    cookie.path = "/"
-    cookie.expires = Time.now + 86400
-    res.cookies << cookie
-    res['Content-Type'] = "text/html"
-    res.body = "<html><body>hello</body></html>"
-  end
-end
-
-class QuotedValueCookieServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    cookie = WEBrick::Cookie.new("quoted", "\"value\"")
-    cookie.path = "/"
-    cookie.expires = Time.now + 86400
-    res.cookies << cookie
-    res['Content-Type'] = "text/html"
-    res.body = "<html><body>hello</body></html>"
-  end
-end
-
-class RedirectServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    res['Content-Type'] = req.query['ct'] || "text/html"
-    res.status = req.query['code'] ? req.query['code'].to_i : '302'
-    res['Location'] = "/verb"
-  end
-
-  alias :do_POST :do_GET
-  alias :do_HEAD :do_GET
-  alias :do_PUT :do_GET
-  alias :do_DELETE :do_GET
-end
-
-class RefererServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    res['Content-Type'] = "text/html"
-    res.body = req['Referer'] || ''
-  end
-
-  def do_POST(req, res)
-    res['Content-Type'] = "text/html"
-    res.body = req['Referer'] || ''
-  end
-end
-
-class RefreshWithoutUrl < WEBrick::HTTPServlet::AbstractServlet
-  @@count = 0
-  def do_GET(req, res)
-    res['Content-Type'] = "text/html"
-    @@count += 1
-    if @@count > 1
-      res['Refresh'] = "0; url=http://localhost/index.html";
-    else
-      res['Refresh'] = "0";
-    end
-  end
-end
-
-class RefreshWithEmptyUrl < WEBrick::HTTPServlet::AbstractServlet
-  @@count = 0
-  def do_GET(req, res)
-    res['Content-Type'] = "text/html"
-    @@count += 1
-    if @@count > 1
-      res['Refresh'] = "0; url=http://localhost/index.html";
-    else
-      res['Refresh'] = "0; url=";
-    end
-  end
-end
-
-class ResponseCodeServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    res['Content-Type'] = req.query['ct'] || "text/html"
-    if req.query['code']
-      code = req.query['code'].to_i
-      case code
-      when 300, 301, 302, 303, 304, 305, 307
-        res['Location'] = "/index.html"
-      end
-      res.status = code
-    else
-    end
-  end
-end
-
-class SendCookiesServlet < WEBrick::HTTPServlet::AbstractServlet
-  def do_GET(req, res)
-    res['Content-Type'] = "text/html"
-    res.body = "<html><body>"
-    req.cookies.each { |c|
-      res.body << "<a href=\"#\">#{c.name}:#{c.value}</a>"
-    }
-    res.body << "</body></html>"
-  end
-end
-
-class VerbServlet < WEBrick::HTTPServlet::AbstractServlet
-  %w(HEAD GET POST PUT DELETE).each do |verb|
-    eval(<<-eomethod)
-      def do_#{verb}(req, res)
-        res.header['X-Request-Method'] = #{verb.dump}
-      end
-        eomethod
-  end
-end
-
-class Net::HTTP
+class Net::HTTP # :nodoc:
   alias :old_do_start :do_start
 
   def do_start
     @started = true
   end
-
-  SERVLETS = {
-    '/gzip'                   => GzipServlet,
-    '/form_post'              => FormServlet,
-    '/basic_auth'             => BasicAuthServlet,
-    '/form post'              => FormServlet,
-    '/response_code'          => ResponseCodeServlet,
-    '/http_refresh'           => HttpRefreshServlet,
-    '/content_type_test'      => ContentTypeServlet,
-    '/referer'                => RefererServlet,
-    '/file_upload'            => FileUploadServlet,
-    '/one_cookie'             => OneCookieServlet,
-    '/one_cookie_no_space'    => OneCookieNoSpacesServlet,
-    '/many_cookies'           => ManyCookiesServlet,
-    '/many_cookies_as_string' => ManyCookiesAsStringServlet,
-    '/ntlm'                   => NTLMServlet,
-    '/send_cookies'           => SendCookiesServlet,
-    '/quoted_value_cookie'    => QuotedValueCookieServlet,
-    '/if_modified_since'      => ModifiedSinceServlet,
-    '/http_headers'           => HeaderServlet,
-    '/infinite_redirect'      => InfiniteRedirectServlet,
-    '/infinite_refresh'       => InfiniteRefreshServlet,
-    '/redirect'               => RedirectServlet,
-    '/refresh_without_url'    => RefreshWithoutUrl,
-    '/refresh_with_empty_url' => RefreshWithEmptyUrl,
-    '/digest_auth'            => DigestAuthServlet,
-    '/verb'                   => VerbServlet,
-  }
 
   PAGE_CACHE = {}
 
@@ -569,7 +208,7 @@ class Net::HTTP
 
     Mechanize::TestCase::REQUESTS << req
 
-    if servlet_klass = SERVLETS[path]
+    if servlet_klass = MECHANIZE_TEST_CASE_SERVLETS[path]
       servlet = servlet_klass.new({})
       servlet.send "do_#{req.method}", req, res
     else
@@ -609,8 +248,12 @@ class Net::HTTP
 
     io = StringIO.new(res.body)
     response.instance_variable_set :@socket, io
-    def io.read clen, dest, _
-      dest << string[0, clen]
+    def io.read clen, dest = nil, _ = nil
+      if dest then
+        dest << super(clen)
+      else
+        super clen
+      end
     end
 
     body_exist = req.response_body_permitted? &&
@@ -624,11 +267,19 @@ class Net::HTTP
   end
 end
 
-class Net::HTTPRequest
+class Net::HTTPRequest # :nodoc:
   attr_accessor :query, :body, :cookies, :user
+
+  def host
+    'example'
+  end
+
+  def port
+    80
+  end
 end
 
-class Response
+class Response # :nodoc:
   include Net::HTTPHeader
 
   attr_reader :code

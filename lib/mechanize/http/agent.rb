@@ -43,10 +43,9 @@ class Mechanize::HTTP::Agent
 
   # :section: HTTP Authentication
 
+  attr_reader :auth_store # :nodoc:
   attr_reader :authenticate_methods # :nodoc:
   attr_reader :digest_challenges # :nodoc:
-  attr_accessor :user
-  attr_accessor :password
 
   # :section: Redirection
 
@@ -77,36 +76,10 @@ class Mechanize::HTTP::Agent
 
   # :section: SSL
 
-  # Path to an OpenSSL server certificate file
-  attr_accessor :ca_file
-
-  # An OpenSSL private key or the path to a private key
-  attr_accessor :key
-
-  # An OpenSSL client certificate or the path to a certificate file.
-  attr_accessor :cert
-
-  # An SSL certificate store
-  attr_accessor :cert_store
-
   # OpenSSL key password
   attr_accessor :pass
 
-  # A callback for additional certificate verification.  See
-  # OpenSSL::SSL::SSLContext#verify_callback
-  #
-  # The callback can be used for debugging or to ignore errors by always
-  # returning +true+.  Specifying nil uses the default method that was valid
-  # when the SSLContext was created
-  attr_accessor :verify_callback
-
-  # How to verify SSL connections.  Defaults to VERIFY_PEER
-  attr_accessor :verify_mode
-
   # :section: Timeouts
-
-  # Reset connections that have not been used in this many seconds
-  attr_reader   :idle_timeout
 
   # Set to false to disable HTTP/1.1 keep-alive requests
   attr_accessor :keep_alive
@@ -122,14 +95,8 @@ class Mechanize::HTTP::Agent
   # The cookies for this agent
   attr_accessor :cookie_jar
 
-  # URI for a proxy connection
-  attr_reader :proxy_uri
-
-  # Retry non-idempotent requests?
-  attr_reader :retry_change_requests
-
   # Responses larger than this will be written to a Tempfile instead of stored
-  # in memory.
+  # in memory.  Setting this to nil disables creation of Tempfiles.
   attr_accessor :max_file_buffer
 
   # :section: Utility
@@ -138,6 +105,11 @@ class Mechanize::HTTP::Agent
   attr_accessor :context
 
   attr_reader :http # :nodoc:
+
+  # When set to true mechanize will ignore an EOF during chunked transfer
+  # encoding so long as at least one byte was received.  Be careful when
+  # enabling this as it may cause data loss.
+  attr_accessor :ignore_bad_chunking
 
   # Handlers for various URI schemes
   attr_accessor :scheme_handlers
@@ -156,24 +128,22 @@ class Mechanize::HTTP::Agent
     @follow_meta_refresh_self = false
     @gzip_enabled             = true
     @history                  = Mechanize::History.new
-    @idle_timeout             = nil
+    @ignore_bad_chunking      = false
     @keep_alive               = true
-    @keep_alive_time          = 300
-    @max_file_buffer          = 10240
+    @max_file_buffer          = 100_000 # 5MB for response bodies
     @open_timeout             = nil
     @post_connect_hooks       = []
     @pre_connect_hooks        = []
-    @proxy_uri                = nil
     @read_timeout             = nil
     @redirect_ok              = true
     @redirection_limit        = 20
     @request_headers          = {}
-    @retry_change_requests    = false
     @robots                   = false
     @user_agent               = nil
     @webrobots                = nil
 
     # HTTP Authentication
+    @auth_store           = Mechanize::HTTP::AuthStore.new
     @authenticate_parser  = Mechanize::HTTP::WWWAuthenticateParser.new
     @authenticate_methods = Hash.new do |methods, uri|
       methods[uri] = Hash.new do |realms, auth_scheme|
@@ -182,17 +152,9 @@ class Mechanize::HTTP::Agent
     end
     @digest_auth          = Net::HTTP::DigestAuth.new
     @digest_challenges    = {}
-    @password             = nil # HTTP auth password
-    @user                 = nil # HTTP auth user
 
     # SSL
-    @ca_file         = nil
-    @cert            = nil
-    @cert_store      = nil
-    @key             = nil
-    @pass            = nil
-    @verify_callback = nil
-    @verify_mode     = nil
+    @pass = nil
 
     @scheme_handlers = Hash.new { |h, scheme|
       h[scheme] = lambda { |link, page|
@@ -204,8 +166,39 @@ class Mechanize::HTTP::Agent
     @scheme_handlers['https']     = @scheme_handlers['http']
     @scheme_handlers['relative']  = @scheme_handlers['http']
     @scheme_handlers['file']      = @scheme_handlers['http']
+
+    @http = Net::HTTP::Persistent.new 'mechanize'
+    @http.idle_timeout = 5
+    @http.keep_alive   = 300
   end
 
+  ##
+  # Adds credentials +user+, +pass+ for +uri+.  If +realm+ is set the
+  # credentials are used only for that realm.  If +realm+ is not set the
+  # credentials become the default for any realm on that URI.
+  #
+  # +domain+ and +realm+ are exclusive as NTLM does not follow RFC 2617.  If
+  # +domain+ is given it is only used for NTLM authentication.
+
+  def add_auth uri, user, password, realm = nil, domain = nil
+    @auth_store.add_auth uri, user, password, realm, domain
+  end
+
+  ##
+  # USE OF add_default_auth IS NOT RECOMMENDED AS IT MAY EXPOSE PASSWORDS TO
+  # THIRD PARTIES
+  #
+  # Adds credentials +user+, +pass+ as the default authentication credentials.
+  # If no other credentials are available  these will be returned from
+  # credentials_for.
+  #
+  # If +domain+ is given it is only used for NTLM authentication.
+
+  def add_default_auth user, password, domain = nil # :nodoc:
+    @auth_store.add_default_auth user, password, domain
+  end
+
+  ##
   # Retrieves +uri+ and parses it into a page or other object according to
   # PluggableParser.  If the URI is an HTTP or HTTPS scheme URI the given HTTP
   # +method+ is used to retrieve it, along with the HTTP +headers+, request
@@ -261,17 +254,25 @@ class Mechanize::HTTP::Agent
     response_body_io = nil
 
     # Send the request
-    response = connection.request(uri, request) { |res|
-      response_log res
+    begin
+      response = connection.request(uri, request) { |res|
+        response_log res
 
-      response_body_io = response_read res, request
+        response_body_io = response_read res, request, uri
 
-      res
-    }
+        res
+      }
+    rescue Mechanize::ChunkedTerminationError => e
+      raise unless @ignore_bad_chunking
+
+      response = e.response
+      response_body_io = e.body_io
+    end
 
     hook_content_encoding response, uri, response_body_io
 
-    response_body_io = response_content_encoding response, response_body_io
+    response_body_io = response_content_encoding response, response_body_io if
+      request.response_body_permitted?
 
     post_connect uri, response, response_body_io
 
@@ -295,20 +296,30 @@ class Mechanize::HTTP::Agent
       log.debug("Got cached page") if log
       visited_page(uri) || page
     when Net::HTTPRedirection
-      response_redirect response, method, page, redirects, referer
+      response_redirect response, method, page, redirects, headers, referer
     when Net::HTTPUnauthorized
       response_authenticate(response, page, uri, request, headers, params,
                             referer)
     else
-      raise Mechanize::ResponseCodeError.new(page), "Unhandled response"
+      raise Mechanize::ResponseCodeError.new(page, 'unhandled response')
     end
+  end
+
+  # URI for a proxy connection
+
+  def proxy_uri
+    @http.proxy_uri
+  end
+
+  # Retry non-idempotent requests?
+  def retry_change_requests
+    @http.retry_change_requests
   end
 
   # Retry non-idempotent requests
 
   def retry_change_requests= retri
-    @retry_change_requests = retri
-    @http.retry_change_requests = retri if @http
+    @http.retry_change_requests = retri
   end
 
   # :section: Headers
@@ -392,6 +403,61 @@ class Mechanize::HTTP::Agent
     end
   end
 
+  ##
+  # Decodes a gzip-encoded +body_io+.  If it cannot be decoded, inflate is
+  # tried followed by raising an error.
+
+  def content_encoding_gunzip body_io
+    log.debug('gzip response') if log
+
+    zio = Zlib::GzipReader.new body_io
+    out_io = auto_io 'mechanize-gunzip', 16384, zio
+    zio.finish
+
+    return out_io
+  rescue Zlib::Error => gz_error
+    log.warn "unable to gunzip response: #{gz_error} (#{gz_error.class})" if
+      log
+
+    body_io.rewind
+    body_io.read 10
+
+    begin
+      log.warn "trying raw inflate on response" if log
+      return inflate body_io, -Zlib::MAX_WBITS
+    rescue Zlib::Error => e
+      log.error "unable to inflate response: #{e} (#{e.class})" if log
+      raise
+    end
+  ensure
+    # do not close a second time if we failed the first time
+    zio.close if zio and not (zio.closed? or gz_error)
+    body_io.close unless body_io.closed?
+  end
+
+  ##
+  # Decodes a deflate-encoded +body_io+.  If it cannot be decoded, raw inflate
+  # is tried followed by raising an error.
+
+  def content_encoding_inflate body_io
+    log.debug('deflate body') if log
+
+    return inflate body_io
+  rescue Zlib::Error
+    log.error('unable to inflate response, trying raw deflate') if log
+
+    body_io.rewind
+
+    begin
+      return inflate body_io, -Zlib::MAX_WBITS
+    rescue Zlib::Error => e
+      log.error("unable to inflate response: #{e}") if log
+      raise
+    end
+  ensure
+    body_io.close
+  end
+
   def disable_keep_alive request
     request['connection'] = 'close' unless @keep_alive
   end
@@ -443,16 +509,18 @@ class Mechanize::HTTP::Agent
       request_auth_digest request, uri, realm, base_uri, false
     elsif realm = schemes[:iis_digest].find { |r| r.uri == base_uri } then
       request_auth_digest request, uri, realm, base_uri, true
-    elsif schemes[:basic].find { |r| r.uri == base_uri } then
-      request.basic_auth @user, @password
+    elsif realm = schemes[:basic].find { |r| r.uri == base_uri } then
+      user, password, = @auth_store.credentials_for uri, realm.realm
+      request.basic_auth user, password
     end
   end
 
   def request_auth_digest request, uri, realm, base_uri, iis
     challenge = @digest_challenges[realm]
 
-    uri.user = @user
-    uri.password = @password
+    user, password, = @auth_store.credentials_for uri, realm.realm
+    uri.user     = user
+    uri.password = password
 
     auth = @digest_auth.auth_header uri, challenge.to_s, request.method, iis
     request['Authorization'] = auth
@@ -491,11 +559,17 @@ class Mechanize::HTTP::Agent
     end
   end
 
+  # Sets a Referer header.  Fragment part is removed as demanded by
+  # RFC 2616 14.36, and user information part is removed just like
+  # major browsers do.
   def request_referer request, uri, referer
     return unless referer
-    return if 'https' == referer.scheme.downcase and
-              'https' != uri.scheme.downcase
-
+    return if 'https'.casecmp(referer.scheme) == 0 and
+              'https'.casecmp(uri.scheme) != 0
+    if referer.fragment || referer.user || referer.password
+      referer = referer.dup
+      referer.fragment = referer.user = referer.password = nil
+    end
     request['Referer'] = referer
   end
 
@@ -504,39 +578,56 @@ class Mechanize::HTTP::Agent
   end
 
   def resolve(uri, referer = current_page)
-    uri = uri.dup if uri.is_a?(URI)
+    referer_uri = referer && referer.uri
+    if uri.is_a?(URI)
+      uri = uri.dup
+    elsif uri.nil?
+      if referer_uri
+        return referer_uri
+      end
+      raise ArgumentError, "absolute URL needed (not nil)"
+    else
+      url = uri.to_s.strip
+      if url.empty?
+        if referer_uri
+          return referer_uri.dup.tap { |u| u.fragment = nil }
+        end
+        raise ArgumentError, "absolute URL needed (not #{uri.inspect})"
+      end
 
-    unless uri.is_a?(URI)
-      uri = uri.to_s.strip.gsub(/[^#{0.chr}-#{126.chr}]/o) { |match|
+      url.gsub!(/[^#{0.chr}-#{126.chr}]/o) { |match|
         if RUBY_VERSION >= "1.9.0"
           Mechanize::Util.uri_escape(match)
         else
-          sprintf('%%%X', match.unpack($KCODE == 'UTF8' ? 'U' : 'C')[0])
+          begin
+            sprintf('%%%X', match.unpack($KCODE == 'UTF8' ? 'U' : 'C').first)
+          rescue ArgumentError
+            # workaround for ruby 1.8 with -Ku but ISO-8859-1 characters in
+            # URIs.  See #227.  I can't wait to drop 1.8 support
+            sprintf('%%%X', match.unpack('C').first)
+          end
         end
       }
 
-      unescaped = uri.split(/(?:%[0-9A-Fa-f]{2})+|#/)
-      escaped   = uri.scan(/(?:%[0-9A-Fa-f]{2})+|#/)
-
-      escaped_uri = Mechanize::Util.html_unescape(
-        unescaped.zip(escaped).map { |x,y|
+      escaped_url = Mechanize::Util.html_unescape(
+        url.split(/((?:%[0-9A-Fa-f]{2})+|#)/).each_slice(2).map { |x, y|
           "#{WEBrick::HTTPUtils.escape(x)}#{y}"
         }.join('')
       )
 
       begin
-        uri = URI.parse(escaped_uri)
+        uri = URI.parse(escaped_url)
       rescue
-        uri = URI.parse(WEBrick::HTTPUtils.escape(escaped_uri))
+        uri = URI.parse(WEBrick::HTTPUtils.escape(escaped_url))
       end
     end
 
     scheme = uri.relative? ? 'relative' : uri.scheme.downcase
     uri = @scheme_handlers[scheme].call(uri, referer)
 
-    if referer && referer.uri
+    if referer_uri
       if uri.path.length == 0 && uri.relative?
-        uri.path = referer.uri.path
+        uri.path = referer_uri.path
       end
     end
 
@@ -544,17 +635,16 @@ class Mechanize::HTTP::Agent
 
     if uri.relative?
       raise ArgumentError, "absolute URL needed (not #{uri})" unless
-        referer && referer.uri
+        referer_uri
 
-      base = nil
-      if referer.respond_to?(:bases) && referer.parser
-        base = referer.bases.last
+      if referer.respond_to?(:bases) && referer.parser &&
+          (lbase = referer.bases.last) && lbase.uri && lbase.uri.absolute?
+        base = lbase
+      else
+        base = nil
       end
 
-      uri = ((base && base.uri && base.uri.absolute?) ?
-             base.uri :
-             referer.uri) + uri
-      uri = referer.uri + uri
+      uri = referer_uri + (base ? base.uri : referer_uri) + uri
       # Strip initial "/.." bits from the path
       uri.path.sub!(/^(\/\.\.)+(?=\/)/, '')
     end
@@ -600,9 +690,19 @@ class Mechanize::HTTP::Agent
 
   def response_authenticate(response, page, uri, request, headers, params,
                             referer)
-    raise Mechanize::UnauthorizedError, page unless @user || @password
+    www_authenticate = response['www-authenticate']
 
-    challenges = @authenticate_parser.parse response['www-authenticate']
+    unless www_authenticate = response['www-authenticate'] then
+      message = 'WWW-Authenticate header missing in response'
+      raise Mechanize::UnauthorizedError.new(page, nil, message)
+    end
+                                               
+    challenges = @authenticate_parser.parse www_authenticate
+
+    unless @auth_store.credentials? uri, challenges then
+      message = "no credentials found, provide some with #add_auth"
+      raise Mechanize::UnauthorizedError.new(page, challenges, message)
+    end
 
     if challenge = challenges.find { |c| c.scheme =~ /^Digest$/i } then
       realm = challenge.realm uri
@@ -615,23 +715,30 @@ class Mechanize::HTTP::Agent
 
       existing_realms = @authenticate_methods[realm.uri][auth_scheme]
 
-      raise Mechanize::UnauthorizedError, page if
-        existing_realms.include? realm
+      if existing_realms.include? realm
+        message = 'Digest authentication failed'
+        raise Mechanize::UnauthorizedError.new(page, challeges, message)
+      end
 
       existing_realms << realm
       @digest_challenges[realm] = challenge
     elsif challenge = challenges.find { |c| c.scheme == 'NTLM' } then
       existing_realms = @authenticate_methods[uri + '/'][:ntlm]
 
-      raise Mechanize::UnauthorizedError, page if
-        existing_realms.include?(realm) and not challenge.params
+      if existing_realms.include?(realm) and not challenge.params then
+        message = 'NTLM authentication failed'
+        raise Mechanize::UnauthorizedError.new(page, challenges, message)
+      end
 
       existing_realms << realm
 
       if challenge.params then
         type_2 = Net::NTLM::Message.decode64 challenge.params
 
-        type_3 = type_2.response({ :user => @user, :password => @password, },
+        user, password, domain = @auth_store.credentials_for uri, nil
+
+        type_3 = type_2.response({ :user => user, :password => password,
+                                   :domain => domain },
                                  { :ntlmv2 => true }).encode64
 
         headers['Authorization'] = "NTLM #{type_3}"
@@ -644,83 +751,60 @@ class Mechanize::HTTP::Agent
 
       existing_realms = @authenticate_methods[realm.uri][:basic]
 
-      raise Mechanize::UnauthorizedError, page if
-        existing_realms.include? realm
+      if existing_realms.include? realm then
+        message = 'Basic authentication failed'
+        raise Mechanize::UnauthorizedError.new(page, challenges, message)
+      end
 
       existing_realms << realm
     else
-      raise Mechanize::UnauthorizedError, page
+      message = 'unsupported authentication scheme'
+      raise Mechanize::UnauthorizedError.new(page, challenges, message)
     end
 
     fetch uri, request.method.downcase.to_sym, headers, params, referer
   end
 
   def response_content_encoding response, body_io
-    length = response.content_length
+    length = response.content_length ||
+      case body_io
+      when Tempfile, IO then
+        body_io.stat.size
+      else
+        body_io.length
+      end
 
-    length = case body_io
-             when IO, Tempfile then
-               body_io.stat.size
+    return body_io if length.zero?
+
+    out_io = case response['Content-Encoding']
+             when nil, 'none', '7bit' then
+               body_io
+             when 'deflate' then
+               content_encoding_inflate body_io
+             when 'gzip', 'x-gzip' then
+               content_encoding_gunzip body_io
              else
-               body_io.length
-             end unless length
-
-    out_io = nil
-
-    case response['Content-Encoding']
-    when nil, 'none', '7bit' then
-      out_io = body_io
-    when 'deflate' then
-      log.debug('deflate body') if log
-
-      return if length.zero?
-
-      begin
-        out_io = inflate body_io
-      rescue Zlib::BufError, Zlib::DataError
-        log.error('Unable to inflate page, retrying with raw deflate') if log
-        body_io.rewind
-        begin
-          out_io = inflate body_io, -Zlib::MAX_WBITS
-        rescue Zlib::BufError, Zlib::DataError
-          log.error("unable to inflate page: #{$!}") if log
-          nil
-        end
-      end
-    when 'gzip', 'x-gzip' then
-      log.debug('gzip body') if log
-
-      return if length.zero?
-
-      begin
-        zio = Zlib::GzipReader.new body_io
-        out_io = Tempfile.new 'mechanize-decode'
-        out_io.binmode
-
-        until zio.eof? do
-          out_io.write zio.read 16384
-        end
-      rescue Zlib::BufError, Zlib::GzipFile::Error
-        log.error('Unable to gunzip body, trying raw inflate') if log
-        body_io.rewind
-        body_io.read 10
-
-        out_io = inflate body_io, -Zlib::MAX_WBITS
-      rescue Zlib::DataError
-        log.error("unable to gunzip page: #{$!}") if log
-        ''
-      ensure
-        zio.close if zio and not zio.closed?
-      end
-    else
-      raise Mechanize::Error,
-            "Unsupported Content-Encoding: #{response['Content-Encoding']}"
-    end
+               raise Mechanize::Error,
+                 "unsupported content-encoding: #{response['Content-Encoding']}"
+             end
 
     out_io.flush
     out_io.rewind
 
     out_io
+  rescue Zlib::Error => e
+    message = "error handling content-encoding #{response['Content-Encoding']}:"
+    message << " #{e.message} (#{e.class})"
+    raise Mechanize::Error, message
+  ensure
+    begin
+      if Tempfile === body_io and
+         (StringIO === out_io or out_io.path != body_io.path) then
+        body_io.close! 
+      end
+    rescue IOError
+      # HACK ruby 1.8 raises IOError when closing the stream
+    end
   end
 
   def response_cookies response, uri, page
@@ -752,7 +836,8 @@ class Mechanize::HTTP::Agent
 
   def response_follow_meta_refresh response, uri, page, redirects
     delay, new_url = get_meta_refresh(response, uri, page)
-    return nil unless new_url
+    return nil unless delay
+    new_url = new_url ? resolve(new_url, page) : uri
 
     raise Mechanize::RedirectLimitReachedError.new(page, redirects) if
       redirects + 1 > @redirection_limit
@@ -760,7 +845,7 @@ class Mechanize::HTTP::Agent
     sleep delay
     @history.push(page, page.uri)
     fetch new_url, :get, {}, [],
-          Mechanize::Page.new(nil, {'content-type'=>'text/html'}), redirects
+          Mechanize::Page.new, redirects
   end
 
   def response_log response
@@ -778,12 +863,11 @@ class Mechanize::HTTP::Agent
     @context.parse uri, response, body_io
   end
 
-  def response_read response, request
+  def response_read response, request, uri
     content_length = response.content_length
 
-    if content_length and content_length > @max_file_buffer then
-      body_io = Tempfile.new 'mechanize-raw'
-      body_io.binmode if defined? body_io.binmode
+    if use_tempfile? content_length then
+      body_io = make_tempfile 'mechanize-raw'
     else
       body_io = StringIO.new
     end
@@ -795,9 +879,8 @@ class Mechanize::HTTP::Agent
       response.read_body { |part|
         total += part.length
 
-        if StringIO === body_io and total > @max_file_buffer then
-          new_io = Tempfile.new 'mechanize-raw'
-          new_io.binmode
+        if StringIO === body_io and use_tempfile? total then
+          new_io = make_tempfile 'mechanize-raw'
 
           new_io.write body_io.string
 
@@ -807,15 +890,23 @@ class Mechanize::HTTP::Agent
         body_io.write(part)
         log.debug("Read #{part.length} bytes (#{total} total)") if log
       }
+    rescue EOFError => e
+      # terminating CRLF might be missing, let the user check the document
+      raise unless response.chunked? and total.nonzero?
+
+      body_io.rewind
+      raise Mechanize::ChunkedTerminationError.new(e, response, body_io, uri,
+                                                   @context)
     rescue Net::HTTP::Persistent::Error => e
       body_io.rewind
-      raise Mechanize::ResponseReadError.new(e, response, body_io)
+      raise Mechanize::ResponseReadError.new(e, response, body_io, uri,
+                                             @context)
     end
 
     body_io.flush
     body_io.rewind
 
-    raise Mechanize::ResponseCodeError, response if
+    raise Mechanize::ResponseCodeError.new(response, uri) if
       Net::HTTPUnknownResponse === response
 
     content_length = response.content_length
@@ -829,7 +920,8 @@ class Mechanize::HTTP::Agent
     body_io
   end
 
-  def response_redirect response, method, page, redirects, referer = current_page
+  def response_redirect(response, method, page, redirects, headers,
+                        referer = current_page)
     case @redirect_ok
     when true, :all
       # shortcut
@@ -846,11 +938,15 @@ class Mechanize::HTTP::Agent
 
     redirect_method = method == :head ? :head : :get
 
-    from_uri = page.uri
-    @history.push(page, from_uri)
-    new_uri = from_uri + response['Location'].to_s
+    # Make sure we are not copying over the POST headers from the original request
+    ['Content-Length', 'Content-MD5', 'Content-Type'].each do |key|
+      headers.delete key
+    end
 
-    fetch new_uri, redirect_method, {}, [], referer, redirects + 1
+    @history.push(page, page.uri)
+    new_uri = resolve response['Location'].to_s, page
+
+    fetch new_uri, redirect_method, headers, [], referer, redirects + 1
   end
 
   # :section: Robots
@@ -907,69 +1003,155 @@ class Mechanize::HTTP::Agent
 
   # :section: SSL
 
+  # Path to an OpenSSL CA certificate file
+  def ca_file
+    @http.ca_file
+  end
+
+  # Sets the path to an OpenSSL CA certificate file
+  def ca_file= ca_file
+    @http.ca_file = ca_file
+  end
+
+  # The SSL certificate store used for validating connections
+  def cert_store
+    @http.cert_store
+  end
+
+  # Sets the SSL certificate store used for validating connections
+  def cert_store= cert_store
+    @http.cert_store = cert_store
+  end
+
+  # The client X509 certificate
   def certificate
     @http.certificate
   end
 
+  # Sets the client certificate to given X509 certificate.  If a path is given
+  # the certificate will be loaded and set.
+  def certificate= certificate
+    certificate = if OpenSSL::X509::Certificate === certificate then
+                    certificate
+                  else
+                    OpenSSL::X509::Certificate.new File.read certificate
+                  end
+
+    @http.certificate = certificate
+  end
+
+  # An OpenSSL private key or the path to a private key
+  def private_key
+    @http.private_key
+  end
+
+  # Sets the client's private key
+  def private_key= private_key
+    private_key = if OpenSSL::PKey::PKey === private_key then
+                    private_key
+                  else
+                    OpenSSL::PKey::RSA.new File.read(private_key), @pass
+                  end
+
+    @http.private_key = private_key
+  end
+
+  # SSL version to use
+  def ssl_version
+    @http.ssl_version
+  end if RUBY_VERSION > '1.9'
+
+  # Sets the SSL version to use
+  def ssl_version= ssl_version
+    @http.ssl_version = ssl_version
+  end if RUBY_VERSION > '1.9'
+
+  # A callback for additional certificate verification.  See
+  # OpenSSL::SSL::SSLContext#verify_callback
+  #
+  # The callback can be used for debugging or to ignore errors by always
+  # returning +true+.  Specifying nil uses the default method that was valid
+  # when the SSLContext was created
+  def verify_callback
+    @http.verify_callback
+  end
+
+  # Sets the certificate verify callback
+  def verify_callback= verify_callback
+    @http.verify_callback = verify_callback
+  end
+
+  # How to verify SSL connections.  Defaults to VERIFY_PEER
+  def verify_mode
+    @http.verify_mode
+  end
+
+  # Sets the mode for verifying SSL connections
+  def verify_mode= verify_mode
+    @http.verify_mode = verify_mode
+  end
+
   # :section: Timeouts
 
-  # Sets the conection idle timeout for persistent connections
+  # Reset connections that have not been used in this many seconds
+  def idle_timeout
+    @http.idle_timeout
+  end
+
+  # Sets the connection idle timeout for persistent connections
   def idle_timeout= timeout
-    @idle_timeout = timeout
-    @http.idle_timeout = timeout if @http
+    @http.idle_timeout = timeout
   end
 
   # :section: Utility
 
-  def inflate compressed, window_bits = nil
-    inflate = Zlib::Inflate.new window_bits
-    out_io = Tempfile.new 'mechanize-decode'
+  ##
+  # Creates a new output IO by reading +input_io+ in +read_size+ chunks.  If
+  # the output is over the max_file_buffer size a Tempfile with +name+ is
+  # created.
+  #
+  # If a block is provided, each chunk of +input_io+ is yielded for further
+  # processing.
 
-    until compressed.eof? do
-      out_io.write inflate.inflate compressed.read 1024
+  def auto_io name, read_size, input_io
+    out_io = StringIO.new
+
+    out_io.set_encoding Encoding::BINARY if out_io.respond_to? :set_encoding
+
+    until input_io.eof? do
+      if StringIO === out_io and use_tempfile? out_io.size then
+        new_io = make_tempfile name
+        new_io.write out_io.string
+        out_io = new_io
+      end
+
+      chunk = input_io.read read_size
+      chunk = yield chunk if block_given?
+
+      out_io.write chunk
     end
 
-    out_io.write inflate.finish
+    out_io.rewind
 
     out_io
   end
 
-  def log
-    @context.log
+  def inflate compressed, window_bits = nil
+    inflate = Zlib::Inflate.new window_bits
+
+    out_io = auto_io 'mechanize-inflate', 1024, compressed do |chunk|
+      inflate.inflate chunk
+    end
+
+    inflate.finish
+
+    out_io
+  ensure
+    inflate.close
   end
 
-  def set_http
-    @http = Net::HTTP::Persistent.new 'mechanize', @proxy_uri
-
-    @http.keep_alive = @keep_alive_time
-    @http.idle_timeout = @idle_timeout if @idle_timeout
-    @http.retry_change_requests = @retry_change_requests
-
-    @http.ca_file         = @ca_file
-    @http.cert_store      = @cert_store if @cert_store
-    @http.verify_callback = @verify_callback
-    @http.verify_mode     = @verify_mode if @verify_mode
-
-    # update our cached value
-    @verify_mode = @http.verify_mode
-    @cert_store  = @http.cert_store
-
-    if @cert and @key then
-      cert = if OpenSSL::X509::Certificate === @cert then
-               @cert
-             else
-               OpenSSL::X509::Certificate.new ::File.read @cert
-             end
-
-      key = if OpenSSL::PKey::PKey === @key then
-              @key
-            else
-              OpenSSL::PKey::RSA.new ::File.read(@key), @pass
-            end
-
-      @http.certificate = cert
-      @http.private_key = key
-    end
+  def log
+    @context.log
   end
 
   ##
@@ -977,8 +1159,12 @@ class Mechanize::HTTP::Agent
   # with no "http://", +port+ may be a port number, service name or port
   # number string.
 
-  def set_proxy(addr, port, user = nil, pass = nil)
-    return unless addr and port
+  def set_proxy addr, port, user = nil, pass = nil
+    unless addr and port then
+      @http.proxy = nil
+
+      return
+    end
 
     unless Integer === port then
       begin
@@ -992,13 +1178,29 @@ class Mechanize::HTTP::Agent
       end
     end
 
-    @proxy_uri = URI "http://#{addr}"
-    @proxy_uri.port = port
-    @proxy_uri.user     = user if user
-    @proxy_uri.password = pass if pass
+    proxy_uri = URI "http://#{addr}"
+    proxy_uri.port = port
+    proxy_uri.user     = user if user
+    proxy_uri.password = pass if pass
 
-    @proxy_uri
+    @http.proxy = proxy_uri
+  end
+
+  def make_tempfile name
+    io = Tempfile.new name
+    io.unlink
+    io.binmode if io.respond_to? :binmode
+    io
+  end
+
+  def use_tempfile? size
+    return false unless @max_file_buffer
+    return false unless size
+
+    size >= @max_file_buffer
   end
 
 end
+
+require 'mechanize/http/auth_store'
 

@@ -41,9 +41,17 @@ class TestMechanize < Mechanize::TestCase
   end
 
   def test_basic_auth
-    @mech.basic_auth('user', 'pass')
-    page = @mech.get("http://localhost/basic_auth")
-    assert_equal('You are authenticated', page.body)
+    _, err = capture_io do
+      @mech.basic_auth 'user', 'pass' # warns
+    end
+
+    line = __LINE__ - 3
+    file = File.basename __FILE__
+
+    assert_match "#{file} line #{line}", err
+
+    page = @mech.get @uri + '/basic_auth'
+    assert_equal 'You are authenticated', page.body
   end
 
   def test_cert_key_file
@@ -275,16 +283,45 @@ but not <a href="/" rel="me nofollow">this</a>!
     assert_equal 'GET', page.header['X-Request-Method']
   end
 
-  #def test_download
-  #  Dir.mktmpdir do |dir|
-  #    file = "#{dir}/download"
-  #    open file, 'w' do |io|
-  #      @mech.download 'http://example', io
-  #    end
+  def test_download
+    page = nil
 
-  #    assert_equal 1, File.stat(file).size
-  #  end
-  #end
+    in_tmpdir do
+      open 'download', 'w' do |io|
+        page = @mech.download 'http://example', io
+
+        refute io.closed?
+      end
+
+      assert_operator 1, :<=, File.stat('download').size
+    end
+
+    assert_empty @mech.history
+    assert_kind_of Mechanize::Page, page
+  end
+
+  def test_download_filename
+    page = nil
+
+    in_tmpdir do
+      page = @mech.download 'http://example', 'download'
+
+      assert_operator 1, :<=, File.stat('download').size
+    end
+
+    assert_empty @mech.history
+    assert_kind_of Mechanize::Page, page
+  end
+
+  def test_download_filename_error
+    in_tmpdir do
+      assert_raises Mechanize::UnauthorizedError do
+        @mech.download 'http://example/digest_auth', 'download'
+      end
+
+      refute File.exist? 'download'
+    end
+  end
 
   def test_get
     uri = URI 'http://localhost'
@@ -297,7 +334,11 @@ but not <a href="/" rel="me nofollow">this</a>!
 
   def test_get_HTTP
     page = @mech.get('HTTP://localhost/', { :q => 'hello' })
-    assert_equal('HTTP://localhost/?q=hello', page.uri.to_s)
+
+    assert_kind_of URI::HTTP, page.uri
+    assert_equal 'localhost', page.uri.host
+    assert_equal 80,          page.uri.port
+    assert_equal '/?q=hello', page.uri.request_uri
   end
 
   def test_get_anchor
@@ -311,19 +352,19 @@ but not <a href="/" rel="me nofollow">this</a>!
     end
   end
 
-  def test_get_basic_auth_bad
-    @mech.basic_auth('aaron', 'aaron')
+  def test_get_auth_bad
+    @mech.add_auth(@uri, 'aaron', 'aaron')
 
     e = assert_raises Mechanize::UnauthorizedError do
-      @mech.get("http://localhost/basic_auth")
+      @mech.get(@uri + '/basic_auth')
     end
 
     assert_equal("401", e.response_code)
   end
 
-  def test_get_basic_auth_none
+  def test_get_auth_none
     e = assert_raises Mechanize::UnauthorizedError do
-      @mech.get("http://localhost/basic_auth")
+      @mech.get(@uri + '/basic_auth')
     end
 
     assert_equal("401", e.response_code)
@@ -345,7 +386,7 @@ but not <a href="/" rel="me nofollow">this</a>!
   def test_get_digest_auth
     block_called = false
 
-    @mech.basic_auth('user', 'pass')
+    @mech.add_auth(@uri, 'user', 'pass')
 
     @mech.pre_connect_hooks << lambda { |_, request|
       block_called = true
@@ -354,16 +395,9 @@ but not <a href="/" rel="me nofollow">this</a>!
       end
     }
 
-    page = @mech.get("http://localhost/digest_auth")
+    page = @mech.get(@uri + '/digest_auth')
     assert_equal('You are authenticated', page.body)
     assert block_called
-  end
-
-  def test_get_file
-    page = @mech.get("http://localhost/frame_test.html")
-    content_length = page.header['Content-Length']
-    page_as_string = @mech.get_file("http://localhost/frame_test.html")
-    assert_equal(content_length.to_i, page_as_string.length.to_i)
   end
 
   def test_get_follow_meta_refresh
@@ -400,15 +434,15 @@ but not <a href="/" rel="me nofollow">this</a>!
     @mech.follow_meta_refresh = true
     @mech.follow_meta_refresh_self = true
 
-    page = @mech.get('http://localhost/refresh_with_empty_url')
+    page = @mech.get('http://example/refresh_with_empty_url')
 
     assert_equal(3, @mech.history.length)
-    assert_equal('http://localhost/refresh_with_empty_url',
+    assert_equal('http://example/refresh_with_empty_url',
                  @mech.history[0].uri.to_s)
-    assert_equal('http://localhost/refresh_with_empty_url',
+    assert_equal('http://example/refresh_with_empty_url',
                  @mech.history[1].uri.to_s)
-    assert_equal('http://localhost/index.html', page.uri.to_s)
-    assert_equal('http://localhost/index.html', @mech.history.last.uri.to_s)
+    assert_equal('http://example/', page.uri.to_s)
+    assert_equal('http://example/', @mech.history.last.uri.to_s)
   end
 
   def test_get_follow_meta_refresh_in_body
@@ -426,15 +460,15 @@ but not <a href="/" rel="me nofollow">this</a>!
     @mech.follow_meta_refresh = true
     @mech.follow_meta_refresh_self = true
 
-    page = @mech.get('http://localhost/refresh_without_url')
+    page = @mech.get('http://example/refresh_without_url')
 
     assert_equal(3, @mech.history.length)
-    assert_equal('http://localhost/refresh_without_url',
+    assert_equal('http://example/refresh_without_url',
                  @mech.history[0].uri.to_s)
-    assert_equal('http://localhost/refresh_without_url',
+    assert_equal('http://example/refresh_without_url',
                  @mech.history[1].uri.to_s)
-    assert_equal('http://localhost/index.html', page.uri.to_s)
-    assert_equal('http://localhost/index.html', @mech.history.last.uri.to_s)
+    assert_equal('http://example/', page.uri.to_s)
+    assert_equal('http://example/', @mech.history.last.uri.to_s)
   end
 
   def test_get_follow_meta_refresh_referer_not_sent
@@ -532,9 +566,9 @@ but not <a href="/" rel="me nofollow">this</a>!
       requests << request
     }
 
-    page = @mech.get('http://localhost/http_refresh?refresh_time=0')
+    page = @mech.get('http://example/http_refresh?refresh_time=0')
 
-    assert_equal('http://localhost/index.html', page.uri.to_s)
+    assert_equal('http://example/', page.uri.to_s)
     assert_equal(2, @mech.history.length)
     assert_nil requests.last['referer']
   end
@@ -667,6 +701,21 @@ but not <a href="/" rel="me nofollow">this</a>!
     assert_equal('File Upload Form', pages.title)
   end
 
+  def test_get_file
+    body = @mech.get_file 'http://localhost/frame_test.html'
+
+    assert_kind_of String, body
+    refute_empty body
+  end
+
+  def test_get_file_download
+    # non-Mechanize::File
+    body = @mech.get_file 'http://localhost/button.jpg'
+
+    assert_kind_of String, body
+    refute_empty body
+  end
+
   def test_head
     page = @mech.head('http://localhost/verb', { 'q' => 'foo' })
     assert_equal 0, @mech.history.length
@@ -728,6 +777,12 @@ but not <a href="/" rel="me nofollow">this</a>!
                  @mech.history[1].uri.to_s)
   end
 
+  def test_initialize
+    mech = Mechanize.new
+
+    assert_equal 50, mech.max_history
+  end
+
   def test_html_parser_equals
     @mech.html_parser = {}
     assert_raises(NoMethodError) {
@@ -735,10 +790,14 @@ but not <a href="/" rel="me nofollow">this</a>!
     }
   end
 
-  def test_idle_timeout_equals
-    @mech.idle_timeout = 5
+  def test_idle_timeout_default
+    assert_equal 5, Mechanize.new.idle_timeout
+  end
 
-    assert_equal 5, @mech.idle_timeout
+  def test_idle_timeout_equals
+    @mech.idle_timeout = 15
+
+    assert_equal 15, @mech.idle_timeout
   end
 
   def test_keep_alive_equals
@@ -822,15 +881,15 @@ but not <a href="/" rel="me nofollow">this</a>!
     assert_equal "gender=female", requests.first.body
   end
 
-  def test_post_basic_auth
+  def test_post_auth
     requests = []
 
     @mech.pre_connect_hooks << proc { |agent, request|
       requests << request.class
     }
 
-    @mech.basic_auth('user', 'pass')
-    page = @mech.post("http://localhost/basic_auth")
+    @mech.add_auth(@uri, 'user', 'pass')
+    page = @mech.post(@uri + '/basic_auth')
     assert_equal('You are authenticated', page.body)
     assert_equal(2, requests.length)
     r1 = requests[0]
@@ -893,6 +952,42 @@ but not <a href="/" rel="me nofollow">this</a>!
     assert_equal 5, @mech.read_timeout
   end
 
+  def test_referer
+    host_path = "localhost/tc_referer.html?t=1"
+    ['http', 'https'].each { |proto|
+      referer = "#{proto}://#{host_path}"
+      [
+        "",
+	"@",
+	"user1@",
+	":@",
+	"user1:@",
+	":password1@",
+	"user1:password1@",
+      ].each { |userinfo|
+        url = "#{proto}://#{userinfo}#{host_path}"
+        [url, url + "#foo"].each { |furl|
+          [
+            ['relative',		true],
+            ['insecure',		proto == 'http'],
+            ['secure',			true],
+            ['relative noreferrer',	false],
+            ['insecure noreferrer',	false],
+            ['secure noreferrer',	false],
+          ].each_with_index { |(type, bool), i|
+            rpage = @mech.get(furl)
+            page = rpage.links[i].click
+            assert_equal bool ? referer : '', page.body, "%s link from %s" % [type, furl]
+          }
+
+          rpage = @mech.get(furl)
+          page = rpage.forms.first.submit
+          assert_equal referer, page.body, "post from %s" % furl
+        }
+      }
+    }
+  end
+
   def test_retry_change_requests_equals
     refute @mech.retry_change_requests
 
@@ -911,7 +1006,7 @@ but not <a href="/" rel="me nofollow">this</a>!
     assert_equal 'user',      @mech.proxy_user
     assert_equal 'pass',      @mech.proxy_pass
 
-    refute_same http, @mech.agent.http
+    assert_equal URI('http://user:pass@localhost:8080'), http.proxy_uri
   end
 
   def test_submit_bad_form_method

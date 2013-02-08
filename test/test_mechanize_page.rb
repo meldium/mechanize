@@ -8,13 +8,41 @@ class TestMechanizePage < Mechanize::TestCase
     @uri = URI 'http://example/'
   end
 
-  def test_initialize_bad_content_type
-    e = assert_raises Mechanize::ContentTypeError do
-      Mechanize::Page.new(URI('http://example/'),
-                          { 'content-type' => 'text/xml' }, 'hello', '200')
-    end
+  def test_initialize_good_content_type
+    page = Mechanize::Page.new
+    assert_equal('text/html', page.content_type)
 
-    assert_equal('text/xml', e.content_type)
+    [
+      'text/html',
+      'Text/HTML',
+      'text/html; charset=UTF-8',
+      'text/html ; charset=US-ASCII',
+      'application/xhtml+xml',
+      'Application/XHTML+XML',
+      'application/xhtml+xml; charset=UTF-8',
+      'application/xhtml+xml ; charset=US-ASCII',
+    ].each { |content_type|
+      page = Mechanize::Page.new(URI('http://example/'),
+        { 'content-type' => content_type }, 'hello', '200')
+
+      assert_equal(content_type, page.content_type, content_type)
+    }
+  end
+
+  def test_initialize_bad_content_type
+    [
+      'text/xml',
+      'text/xhtml',
+      'text/htmlfu',
+      'footext/html',
+      'application/xhtml+xmlfu',
+      'fooapplication/xhtml+xml',
+    ].each { |content_type|
+      page = Mechanize::Page.new(URI('http://example/'),
+        { 'content-type' => content_type }, 'hello', '200')
+
+      assert_equal(content_type, page.content_type, content_type)
+    }
   end
 
   def test_frames
@@ -61,25 +89,26 @@ class TestMechanizePage < Mechanize::TestCase
     assert_equal "File Upload Form",  page.iframes.first.content.title
   end
 
-  def test_images
+  def test_image_with
     page = html_page <<-BODY
 <img src="a.jpg">
+<img src="b.jpg">
+<img src="c.png">
     BODY
 
-    assert_equal page.images.first.url, "http://example/a.jpg"
+    assert_equal "http://example/b.jpg",
+                 page.image_with(:src => 'b.jpg').url.to_s
   end
 
-  def test_images_base
+  def test_images_with
     page = html_page <<-BODY
-<head>
-  <base href="http://other.example/">
-</head>
-<body>
-  <img src="a.jpg">
-</body>
+<img src="a.jpg">
+<img src="b.jpg">
+<img src="c.png">
     BODY
 
-    assert_equal page.images.first.url, "http://other.example/a.jpg"
+    images = page.images_with(:src => /jpg\Z/).map { |img| img.url.to_s }
+    assert_equal %w[http://example/a.jpg http://example/b.jpg], images
   end
 
   def test_links

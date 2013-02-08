@@ -1,9 +1,149 @@
 = Mechanize CHANGELOG
 
-=== 2.1.1 / ??
+=== 2.5.1
+
+* Bug fix
+  * Mechanize no longer copies POST requests during a redirect which was
+    introduced by #215.  Pull request #229 by Godfrey Chan.
+
+=== 2.5
+
+* Minor enhancements
+  * Added Mechanize#ignore_bad_chunking for working around servers that don't
+    terminate chunked transfer-encoding properly.  Enabling this may cause
+    data loss.  Issue #116
+  * Removed content-type check from Mechanize::Page allowing forced parsing
+    of incorrect or missing content-types.  Issue #221 by GarthSnyder
+* Bug fixes
+  * Fixed typos in EXAMPLES and GUIDES.  Pull Request #213 by Erkan Yilmaz.
+  * Fixed handling of a quoted content-disposition size.  Pull Request #220 by
+    Jason Rust
+  * Mechanize now ignores a missing gzip footer like browsers do.  Issue #224
+    by afhbl
+  * Mechanize handles saving of files with the same name better now.  Pull
+    Request #223 by Godfrey Chan, Issue #219 by Jon Hart
+  * Mechanize now sends headers across redirects.  Issue #215 by Chris Gahan
+  * Mechanize now raises Mechanize::ResponseReadError when the server does not
+    terminate chunked transfer-encoding properly.  Issue #116
+  * Mechanize no longer raises an exception when multiple identical
+    radiobuttons are checked.  Issue #214 by Matthias Guenther
+  * Fixed documentation for pre_connect_hooks and post_connect_hooks.  Issue
+    #226 by Robert Poor
+  * Worked around ruby 1.8 run with -Ku and ISO-8859-1 encoded characters in
+    URIs.  Issue #228 by Stanislav O.Pogrebnyak
+
+=== 2.4
+
+* Security fix:
+
+  Mechanize#auth and Mechanize#basic_auth allowed disclosure of passwords to
+  malicious servers and have been deprecated.
+
+  In prior versions of mechanize only one set of HTTP authentication
+  credentials were allowed for all connections.  If a mechanize instance
+  connected to more than one server then a malicious server detecting
+  mechanize could ask for HTTP Basic authentication.  This would expose the
+  username and password intended only for one server.
+
+  Mechanize#auth and Mechanize#basic_auth now warn when used.
+
+  To fix the warning switch to Mechanize#add_auth which requires the URI
+  the credentials are intended for, the username and the password.
+  Optionally an HTTP authentication realm or NTLM domain may be provided.
+
+* Minor enhancement
+  * Improved exception messages for 401 Unauthorized responses.  Mechanize now
+    tells you if you were missing credentials, had an incorrect password, etc.
+
+=== 2.3 / 2012-02-20
+
+* Minor enhancements
+  * Add support for the Max-Age attribute in the Set-Cookie header.
+  * Added Mechanize::Download#body for compatibility with Mechanize::File when
+    using Mechanize#get_file with Mechanize::Image or other Download-based
+    pluggable parser.  Issue #202 by angas
+  * Mechanize#max_file_buffer may be set to nil to disable creation of
+    Tempfiles.
 
 * Bug fixes
+  * Applied Mechanize#max_file_buffer to the Content-Encoding handlers as well
+    to prevent extra Tempfiles for small gzip or deflate response
+  * Increased the default Mechanize#max_file_buffer to 100,000 bytes.  This
+    gives ~5MB of response bodies in memory with the default history setting
+    of 50 pages (depending on GC behavior).
+  * Ignore empty path/domain attributes.
+  * Cookies with an empty Expires attribute value were stored as session
+    cookies but cookies without the Expires attribute were not.  Issue #78
+
+=== 2.2.1 / 2012-02-13
+
+* Bug fixes
+  * Add missing file to the gem, ensure that missing files won't cause
+    failures again.  Issue #201 by Alex
+  * Fix minor grammar issue in README.  Issue #200 by Shane Becker.
+
+=== 2.2 / 2012-02-12
+
+* API changes
+  * MetaRefresh#href is not normalized to an absolute URL, but set to the
+    original value and resolved later.  It is even set to nil when the
+    Refresh URL is unspecified or empty.
+
+* Minor enhancements
+  * Expose ssl_version from net-http-persistent.  Patch by astera.
+  * SSL parameters and proxy may now be set at any time.  Issue #194 by
+    dsisnero.
+  * Improved Mechanize::Page with #image_with and #images_with and
+    Mechanize::Page::Image various img element attribute accessors, #caption,
+    #extname, #mime_type and #fetch.  Pull request #173 by kitamomonga
+  * Added MIME type parsing for content-types in Mechanize::PluggableParser
+    for fine-grained parser choices.  Parsers will be chosen based on exact
+    match, simplified type or media type in that order.  See
+    Mechanize::PluggableParser#[]=.
+  * Added Mechanize#download which downloads a response body to an IO-like or
+    filename.
+  * Added Mechanize::DirectorySaver which saves responses in a single
+    directory.  Issue #187 by yoshie902a.
+  * Added Mechanize::Page::Link#noreferrer?
+  * The documentation for Mechanize::Page#search and #at now show that both
+    XPath and CSS expressions are allowed.  Issue #199 by Shane Becker.
+
+* Bug fixes
+  * Fixed handling of a HEAD request with Accept-Encoding: gzip.  Issue #198
+    by Oleg Dashevskii
+  * Use #resolve for resolving a Location header value.  fixes #197
+  * A Refresh value can have whitespaces around the semicolon and equal sign.
+  * MetaRefresh#click no longer sends out Referer.
+  * A link with an empty href is now resolved correctly where previously the
+    query part was dropped.
+
+=== 2.1.1 / 2012-02-03
+
+* Bug fixes
+  * Set missing idle_timeout default.  Issue #196
   * Meta refresh URIs are now escaped (excluding %).  Issue #177
+  * Fix charset name extraction.  Issue #180
+  * A Referer URI sent on request no longer includes user information
+    or fragment part.
+  * Tempfiles for storing response bodies are unlinked upon creation to avoid
+    possible lack of finalization.  Issue #183
+  * The default maximum history size is now 50 pages to avoid filling up a
+    disk with tempfiles accidentally.  Related to Issue #183
+  * Errors in bodies with deflate and gzip responses now result in a
+    Mechanize::Error instead of silently being ignored and causing future
+    errors.  Issue #185
+  * Mechanize now raises an UnauthorizedError instead of crashing when a 403
+    response does not contain a www-authenticate header.  Issue #181
+  * Mechanize gives a useful exception when attempting to click buttons across
+    pages.  Issue #186
+  * Added note to Mechanize#cert_store describing how to add certificates in
+    case your system does not come with a default set.  Issue #179
+  * Invalid content-disposition headers are now ignored.  Issue #191
+  * Fix NTLM by recognizing the "Negotiation" challenge instead of endlessly
+    looping.  Issue #192
+  * Allow specification of the NTLM domain through Mechanize#auth.  Issue #193
+  * Documented how to convert a Mechanize::ResponseReadError into a File or
+    Page, along with a new method #force_parse.  Issue #176
 
 === 2.1 / 2011-12-20
 

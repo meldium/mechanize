@@ -16,7 +16,18 @@ class TestMechanizeFile < Mechanize::TestCase
       Dir.chdir dir do
         page.save 'test.html'
 
+        assert File.exist? 'test.html'
         assert_equal '0123456789', File.read('test.html')
+        
+        page.save 'test.html'
+        
+        assert File.exist? 'test.html.1'
+        assert_equal '0123456789', File.read('test.html.1')
+        
+        page.save 'test.html'
+        
+        assert File.exist? 'test.html.2'
+        assert_equal '0123456789', File.read('test.html.2')
       end
     end
   end
@@ -55,6 +66,13 @@ class TestMechanizeFile < Mechanize::TestCase
         assert File.exist? 'test.html.1'
       end
     end
+  end
+
+  def test_filename
+    uri = URI 'http://localhost/test.html'
+    page = Mechanize::File.new uri, nil, ''
+
+    assert_equal "test.html", page.filename
   end
 
 end

@@ -1,5 +1,5 @@
 require 'time'
-require 'webrick/cookie'
+require 'webrick/httputils'
 require 'domain_name'
 
 # This class is used to represent an HTTP Cookie.
@@ -93,12 +93,13 @@ class Mechanize::Cookie
 
         cookie_elem.each do |pair|
           pair.strip!
-          key, value = pair.split(/\=/, 2)
+          key, value = pair.split(/=/, 2)
           next unless key
           value = WEBrick::HTTPUtils.dequote(value.strip) if value
 
           case key.downcase
           when 'domain'
+            next unless value && !value.empty?
             begin
               cookie.domain = value
               cookie.for_domain = true
@@ -106,27 +107,27 @@ class Mechanize::Cookie
               log.warn("Couldn't parse domain: #{value}") if log
             end
           when 'path'
+            next unless value && !value.empty?
             cookie.path = value
           when 'expires'
-            if value.empty?
-              cookie.session = true
-              next
-            end
-
+            next unless value && !value.empty?
             begin
               cookie.expires = Time::parse(value)
             rescue
               log.warn("Couldn't parse expires: #{value}") if log
             end
           when 'max-age'
+            next unless value && !value.empty?
             begin
               cookie.max_age = Integer(value)
             rescue
               log.warn("Couldn't parse max age '#{value}'") if log
             end
           when 'comment'
+            next unless value
             cookie.comment = value
           when 'version'
+            next unless value
             begin
               cookie.version = Integer(value)
             rescue
@@ -144,6 +145,11 @@ class Mechanize::Cookie
         cookie.secure    ||= false
         cookie.http_only ||= false
         cookie.domain    ||= uri.host
+
+        # RFC 6265 4.1.2.2
+        cookie.expires     = Time.now + cookie.max_age if cookie.max_age
+        cookie.session     = !cookie.expires
+
         # Move this in to the cookie jar
         yield cookie if block_given?
 

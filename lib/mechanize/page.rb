@@ -13,6 +13,10 @@ class Mechanize::Page < Mechanize::File
   extend Forwardable
   extend Mechanize::ElementMatcher
 
+  DEFAULT_RESPONSE = {
+    'content-type' => 'text/html',
+  }.freeze
+
   attr_accessor :mech
 
   ##
@@ -21,8 +25,7 @@ class Mechanize::Page < Mechanize::File
   attr_reader :encodings
 
   def initialize(uri=nil, response=nil, body=nil, code=nil, mech=nil)
-    raise Mechanize::ContentTypeError, response['content-type'] unless
-      response['content-type'] =~ /^(text\/html)|(application\/xhtml\+xml)/i
+    response ||= DEFAULT_RESPONSE
 
     @meta_content_type = nil
     @encoding = nil
@@ -79,7 +82,7 @@ class Mechanize::Page < Mechanize::File
 
     if @parser
       parser_encoding = @parser.encoding
-      if (parser_encoding && parser_encoding.downcase) != (encoding && encoding.downcase)
+      if parser_encoding && encoding && parser_encoding.casecmp(encoding) != 0
         # lazy reinitialize the parser with the new encoding
         @parser = nil
       end
@@ -186,9 +189,26 @@ class Mechanize::Page < Mechanize::File
     @meta_content_type || response['content-type']
   end
 
-  # Search through the page like HPricot
+  ##
+  # :method: search
+  #
+  # Search for +paths+ in the page using Nokogiri's #search.  The +paths+ can
+  # be XPath or CSS and an optional Hash of namespaces may be appended.
+  #
+  # See Nokogiri::XML::Node#search for further details.
+
   def_delegator :parser, :search, :search
-  def_delegator :parser, :/, :/
+
+  alias / search
+
+  ##
+  # :method: at
+  #
+  # Search through the page for +path+ under +namespace+ using Nokogiri's #at.
+  # The +path+ may be either a CSS or XPath expression.
+  #
+  # See also Nokogiri::XML::Node#at
+
   def_delegator :parser, :at, :at
 
   ##
@@ -284,6 +304,24 @@ class Mechanize::Page < Mechanize::File
   elements_with :iframe
 
   ##
+  # :method: image_with(criteria)
+  #
+  # Find a single image matching +criteria+.
+  # Example:
+  #   page.image_with(:alt => /main/).fetch.save
+
+  ##
+  # :method: images_with(criteria)
+  #
+  # Find all images matching +criteria+.
+  # Example:
+  #   page.images_with(:src => /jpg\Z/).each do |img|
+  #     img.fetch.save
+  #   end
+
+  elements_with :image
+
+  ##
   # Return a list of all link and area tags
   def links
     @links ||= %w{ a area }.map do |tag|
@@ -310,7 +348,7 @@ class Mechanize::Page < Mechanize::File
     query = @mech.follow_meta_refresh == :anywhere ? 'meta' : 'head > meta'
 
     @meta_refresh ||= search(query).map do |node|
-      MetaRefresh.from_node node, self, uri
+      MetaRefresh.from_node node, self
     end.compact
   end
 
@@ -364,10 +402,14 @@ class Mechanize::Page < Mechanize::File
     return @labels_hash
   end
 
-  def self.charset content_type
-    charset = content_type[/charset=([^; ]+)/i, 1]
-    return nil if charset == 'none'
-    charset
+  class << self
+    def charset content_type
+      charset = content_type[/;(?:\s*,)?\s*charset\s*=\s*([^()<>@,;:\\\"\/\[\]?={}\s]+)/i, 1]
+      return nil if charset == 'none'
+      charset
+    end
+
+    alias charset_from_content_type charset
   end
 
   def self.response_header_charset response
@@ -421,12 +463,6 @@ class Mechanize::Page < Mechanize::File
     else
       ''
     end
-  end
-
-  def self.charset_from_content_type content_type
-    charset = content_type[/charset=([^; ]+)/i, 1]
-    return nil if charset == 'none'
-    charset
   end
 end
 

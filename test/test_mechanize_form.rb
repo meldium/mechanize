@@ -5,13 +5,28 @@ class TestMechanizeForm < Mechanize::TestCase
   def setup
     super
 
-    @form = Mechanize::Form.new node 'form'
+    @uri = URI 'http://example'
+    @page = page @uri
+
+    @form = Mechanize::Form.new node('form', 'name' => __name__), @mech, @page
   end
 
   def test_action
     form = Mechanize::Form.new node('form', 'action' => '?a=b&amp;b=c')
 
     assert_equal '?a=b&b=c', form.action
+  end
+
+  def test_add_button_to_query
+    button = Mechanize::Form::Button.new node('input', 'type' => 'submit')
+
+    e = assert_raises ArgumentError do
+      @form.add_button_to_query button
+    end
+
+    assert_equal "#{button.inspect} does not belong to the same page " \
+                 "as the form \"#{@__name__}\" in #{@uri}",
+                 e.message
   end
 
   def test_aset
@@ -48,6 +63,40 @@ class TestMechanizeForm < Mechanize::TestCase
     query = form.build_query
     assert(query.length > 0)
     assert query.all? { |x| x[1] == '' }
+  end
+
+  def test_build_query_radio_button_duplicate
+    html = Nokogiri::HTML <<-HTML
+<form>
+  <input type=radio name=name value=a checked=true>
+  <input type=radio name=name value=a checked=true>
+</form>
+    HTML
+
+    form = Mechanize::Form.new html.at('form'), @mech, @page
+
+    query = form.build_query
+
+    assert_equal [%w[name a]], query
+  end
+
+  def test_build_query_radio_button_multiple_checked
+    html = Nokogiri::HTML <<-HTML
+<form>
+  <input type=radio name=name value=a checked=true>
+  <input type=radio name=name value=b checked=true>
+</form>
+    HTML
+
+    form = Mechanize::Form.new html.at('form'), @mech, @page
+
+    e = assert_raises Mechanize::Error do
+      form.build_query
+    end
+
+    assert_equal 'radiobuttons "a, b" are checked in the "name" group, ' \
+                 'only one is allowed',
+                 e.message
   end
 
   def test_method_missing_get

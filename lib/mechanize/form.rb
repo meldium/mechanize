@@ -231,12 +231,14 @@ class Mechanize::Form
     radio_groups.each_value do |g|
       checked = g.select {|f| f.checked}
 
-      if checked.size == 1
-        f = checked.first
-        successful_controls << f
-      elsif checked.size > 1
+      if checked.uniq.size > 1 then
+        values = checked.map { |button| button.value }.join(', ').inspect
+        name = checked.first.name.inspect
         raise Mechanize::Error,
-              "multiple radiobuttons are checked in the same group!"
+              "radiobuttons #{values} are checked in the #{name} group, " \
+              "only one is allowed"
+      else
+        successful_controls << checked.first unless checked.empty?
       end
     end
 
@@ -255,6 +257,14 @@ class Mechanize::Form
   # This method adds a button to the query.  If the form needs to be
   # submitted with multiple buttons, pass each button to this method.
   def add_button_to_query(button)
+    unless button.node.document == @form_node.document then
+      message =
+        "#{button.inspect} does not belong to the same page as " \
+        "the form #{@name.inspect} in #{@page.uri}"
+
+      raise ArgumentError, message
+    end
+
     @clicked_buttons << button
   end
 

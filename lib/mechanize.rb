@@ -1,10 +1,10 @@
 require 'fileutils'
 require 'forwardable'
 require 'iconv' if RUBY_VERSION < '1.9.2'
+require 'mime/types'
 require 'mutex_m'
 require 'net/http/digest_auth'
 require 'net/http/persistent'
-require 'nkf'
 require 'nokogiri'
 require 'openssl'
 require 'pp'
@@ -16,7 +16,7 @@ require 'zlib'
 ##
 # The Mechanize library is used for automating interactions with a website.  It
 # can follow links and submit forms.  Form fields can be populated and
-# submitted.  A history of URL's is maintained and can be queried.
+# submitted.  A history of URLs is maintained and can be queried.
 #
 # == Example
 #
@@ -33,13 +33,47 @@ require 'zlib'
 #
 #   search_results = agent.submit search_form
 #   puts search_results.body
+#
+# == Issues with mechanize
+#
+# If you think you have a bug with mechanize, but aren't sure, please file a
+# ticket at https://github.com/tenderlove/mechanize/issues
+#
+# Here are some common problems you may experience with mechanize
+#
+# === Problems connecting to SSL sites
+#
+# Mechanize defaults to validating SSL certificates using the default CA
+# certificates for your platform.  At this time, Windows users do not have
+# integration between the OS default CA certificates and OpenSSL.  #cert_store
+# explains how to download and use Mozilla's CA certificates to allow SSL
+# sites to work.
+#
+# === Problems with content-length
+#
+# Some sites return an incorrect content-length value.  Unlike a browser,
+# mechanize raises an error when the content-length header does not match the
+# response length since it does not know if there was a connection problem or
+# if the mismatch is a server bug.
+#
+# The error raised, Mechanize::ResponseReadError, can be converted to a parsed
+# Page, File, etc. depending upon the content-type:
+#
+#   agent = Mechanize.new
+#   uri = URI 'http://example/invalid_content_length'
+#
+#   begin
+#     page = agent.get uri
+#   rescue Mechanize::ResponseReadError => e
+#     page = e.force_parse
+#   end
 
 class Mechanize
 
   ##
   # The version of Mechanize you are using.
 
-  VERSION = '2.1.1'
+  VERSION = '2.5.1'
 
   ##
   # Base mechanize error class
@@ -137,10 +171,12 @@ class Mechanize
     @default_encoding = nil
     @force_default_encoding = false
 
+    # defaults
+    @agent.max_history = 50
+
     yield self if block_given?
 
     @agent.set_proxy @proxy_addr, @proxy_port, @proxy_user, @proxy_pass
-    @agent.set_http
   end
 
   # :section: History
@@ -171,7 +207,9 @@ class Mechanize
   end
 
   ##
-  # Maximum number of items allowed in the history.
+  # Maximum number of items allowed in the history.  The default setting is 50
+  # pages.  Note that the size of the history multiplied by the maximum
+  # response body size
 
   def max_history
     @agent.history.max_size
@@ -179,6 +217,13 @@ class Mechanize
 
   ##
   # Sets the maximum number of items allowed in the history to +length+.
+  #
+  # Setting the maximum history length to nil will make the history size
+  # unlimited.  Take care when doing this, mechanize stores response bodies in
+  # memory for pages and in the temporary files directory for other responses.
+  # For a long-running mechanize program this can be quite large.
+  #
+  # See also the discussion under #max_file_buffer=
 
   def max_history= length
     @agent.history.max_size = length
@@ -218,16 +263,16 @@ class Mechanize
   attr_accessor :history_added
 
   ##
-  # A list of hooks to call after retrieving a response.  Hooks are called with
-  # the agent and the response returned.
+  # A list of hooks to call after retrieving a response. Hooks are called with
+  # the agent, the URI, the response, and the response body.
 
   def post_connect_hooks
     @agent.post_connect_hooks
   end
 
   ##
-  # A list of hooks to call before making a request.  Hooks are called with
-  # the agent and the request to be performed.
+  # A list of hooks to call before retrieving a response. Hooks are called
+  # with the agent, the URI, the response, and the response body.
 
   def pre_connect_hooks
     @agent.pre_connect_hooks
@@ -252,9 +297,9 @@ class Mechanize
           raise RobotsDisallowedError.new(link.href)
         end
       end
-      if link.rel?('noreferrer')
+      if link.noreferrer?
         href = @agent.resolve(link.href, link.page || current_page)
-        referer = Page.new(nil, {'content-type'=>'text/html'})
+        referer = Page.new
       else
         href = link.href
       end
@@ -279,6 +324,47 @@ class Mechanize
   end
 
   ##
+  # GETs +uri+ and writes it to +io_or_filename+ without recording the request
+  # in the history.  If +io_or_filename+ does not respond to #write it will be
+  # used as a file name.  +parameters+, +referer+ and +headers+ are used as in
+  # #get.
+  #
+  # By default, if the Content-type of the response matches a Mechanize::File
+  # or Mechanize::Page parser, the response body will be loaded into memory
+  # before being saved.  See #pluggable_parser for details on changing this
+  # default.
+  #
+  # For alternate ways of downloading files see Mechanize::FileSaver and
+  # Mechanize::DirectorySaver.
+
+  def download uri, io_or_filename, parameters = [], referer = nil, headers = {}
+    page = transact do
+      get uri, parameters, referer, headers
+    end
+
+    io = if io_or_filename.respond_to? :write then
+           io_or_filename
+         else
+           open io_or_filename, 'wb'
+         end
+
+    case page
+    when Mechanize::File then
+      io.write page.body
+    else
+      body_io = page.body_io
+
+      until body_io.eof? do
+        io.write body_io.read 16384
+      end
+    end
+
+    page
+  ensure
+    io.close if io and not io_or_filename.respond_to? :write
+  end
+
+  ##
   # DELETE +uri+ with +query_params+, and setting +headers+:
   #
   #   delete('http://example/', {'q' => 'foo'}, {})
@@ -300,18 +386,20 @@ class Mechanize
 
     referer ||=
       if uri.to_s =~ %r{\Ahttps?://}
-        Page.new(nil, {'content-type'=>'text/html'})
+        Page.new
       else
-        current_page || Page.new(nil, {'content-type'=>'text/html'})
+        current_page || Page.new
       end
 
     # FIXME: Huge hack so that using a URI as a referer works.  I need to
     # refactor everything to pass around URIs but still support
     # Mechanize::Page#base
     unless Mechanize::Parser === referer then
-      referer = referer.is_a?(String) ?
-      Page.new(URI.parse(referer), {'content-type' => 'text/html'}) :
-        Page.new(referer, {'content-type' => 'text/html'})
+      referer = if referer.is_a?(String) then
+                  Page.new URI(referer)
+                else
+                  Page.new referer
+                end
     end
 
     # fetch the page
@@ -330,14 +418,15 @@ class Mechanize
   end
 
   ##
-  # HEAD +uri+ with +query_params+, and setting +headers+:
+  # HEAD +uri+ with +query_params+ and +headers+:
   #
   #   head('http://example/', {'q' => 'foo'}, {})
 
   def head(uri, query_params = {}, headers = {})
-    # fetch the page
-    page = @agent.fetch(uri, :head, headers, query_params)
+    page = @agent.fetch uri, :head, headers, query_params
+
     yield page if block_given?
+
     page
   end
 
@@ -394,7 +483,7 @@ class Mechanize
   # as the request body, if allowed.
 
   def request_with_entity(verb, uri, entity, headers = {})
-    cur_page = current_page || Page.new(nil, {'content-type'=>'text/html'})
+    cur_page = current_page || Page.new
 
     headers = {
       'Content-Type' => 'application/octet-stream',
@@ -497,6 +586,18 @@ class Mechanize
   attr_accessor :keep_alive_time
 
   ##
+  # The pluggable parser maps a response Content-Type to a parser class.  The
+  # registered Content-Type may be either a full content type like 'image/png'
+  # or a media type 'text'.  See Mechanize::PluggableParser for further
+  # details.
+  #
+  # Example:
+  #
+  #   agent.pluggable_parser['application/octet-stream'] = Mechanize::Download
+
+  attr_reader :pluggable_parser
+
+  ##
   # The HTTP proxy address
 
   attr_reader :proxy_addr
@@ -517,14 +618,41 @@ class Mechanize
   attr_reader :proxy_user
 
   ##
-  # Sets the user and password to be used for HTTP authentication.
+  # *NOTE*: These credentials will be used as a default for any challenge
+  # exposing your password to disclosure to malicious servers.  Use of this
+  # method will warn.  This method is deprecated and will be removed in
+  # mechanize 3.
+  #
+  # Sets the +user+ and +password+ as the default credentials to be used for
+  # HTTP authentication for any server.  The +domain+ is used for NTLM
+  # authentication.
 
-  def auth(user, password)
-    @agent.user     = user
-    @agent.password = password
+  def auth user, password, domain = nil
+    caller.first =~ /(.*?):(\d+).*?$/
+
+    warn <<-WARNING
+At #{$1} line #{$2}
+
+Use of #auth and #basic_auth are deprecated due to a security vulnerability.
+
+    WARNING
+
+    @agent.add_default_auth user, password, domain
   end
 
   alias basic_auth auth
+
+  ##
+  # Adds credentials +user+, +pass+ for +uri+.  If +realm+ is set the
+  # credentials are used only for that realm.  If +realm+ is not set the
+  # credentials become the default for any realm on that URI.
+  #
+  # +domain+ and +realm+ are exclusive as NTLM does not follow RFC 2617.  If
+  # +domain+ is given it is only used for NTLM authentication.
+
+  def add_auth uri, user, password, realm = nil, domain = nil
+    @agent.add_auth uri, user, password, realm, domain
+  end
 
   ##
   # Are If-Modified-Since conditional requests enabled?
@@ -625,6 +753,28 @@ class Mechanize
   end
 
   ##
+  # When set to true mechanize will ignore an EOF during chunked transfer
+  # encoding so long as at least one byte was received.  Be careful when
+  # enabling this as it may cause data loss.
+  #
+  # Net::HTTP does not inform mechanize of where in the chunked stream the EOF
+  # occurred.  Usually it is after the last-chunk but before the terminating
+  # CRLF (invalid termination) but it may occur earlier.  In the second case
+  # your response body may be incomplete.
+
+  def ignore_bad_chunking
+    @agent.ignore_bad_chunking
+  end
+
+  ##
+  # When set to true mechanize will ignore an EOF during chunked transfer
+  # encoding.  See ignore_bad_chunking for further details
+
+  def ignore_bad_chunking= ignore_bad_chunking
+    @agent.ignore_bad_chunking = ignore_bad_chunking
+  end
+
+  ##
   # Are HTTP/1.1 keep-alive connections enabled?
 
   def keep_alive
@@ -658,7 +808,9 @@ class Mechanize
 
   ##
   # Responses larger than this will be written to a Tempfile instead of stored
-  # in memory.  The default is 10240 bytes
+  # in memory.  The default is 100,000 bytes.
+  #
+  # A value of nil disables creation of Tempfiles.
 
   def max_file_buffer
     @agent.max_file_buffer
@@ -666,7 +818,16 @@ class Mechanize
 
   ##
   # Sets the maximum size of a response body that will be stored in memory to
-  # +bytes+
+  # +bytes+.  A value of nil causes all response bodies to be stored in
+  # memory.
+  #
+  # Note that for Mechanize::Download subclasses, the maximum buffer size
+  # multiplied by the number of pages stored in history (controlled by
+  # #max_history) is an approximate upper limit on the amount of memory
+  # Mechanize will use.  By default, Mechanize can use up to ~5MB to store
+  # response bodies for non-File and non-Page (HTML) responses.
+  #
+  # See also the discussion under #max_history=
 
   def max_file_buffer= bytes
     @agent.max_file_buffer = bytes
@@ -864,12 +1025,30 @@ class Mechanize
   # certificate instance
 
   def cert= cert
-    @agent.cert = cert
+    @agent.certificate = cert
   end
 
   ##
   # An OpenSSL certificate store for verifying server certificates.  This
-  # defaults to the default certificate store.
+  # defaults to the default certificate store for your system.
+  #
+  # If your system does not ship with a default set of certificates you can
+  # retrieve a copy of the set from Mozilla here:
+  # http://curl.haxx.se/docs/caextract.html
+  #
+  # (Note that this set does not have an HTTPS download option so you may
+  # wish to use the firefox-db2pem.sh script to extract the certificates
+  # from a local install to avoid man-in-the-middle attacks.)
+  #
+  # After downloading or generating a cacert.pem from the above link you
+  # can create a certificate store from the pem file like this:
+  #
+  #   cert_store = OpenSSL::X509::Store.new
+  #   cert_store.add_file 'cacert.pem'
+  #
+  # And have mechanize use it with:
+  #
+  #   agent.cert_store = cert_store
 
   def cert_store
     @agent.cert_store
@@ -877,6 +1056,8 @@ class Mechanize
 
   ##
   # Sets the OpenSSL certificate store to +store+.
+  #
+  # See also #cert_store
 
   def cert_store= cert_store
     @agent.cert_store = cert_store
@@ -899,10 +1080,11 @@ class Mechanize
   end
 
   ##
-  # Sets the OpenSSL client +key+ to the given path or key instance
+  # Sets the OpenSSL client +key+ to the given path or key instance.  If a
+  # path is given, the path must contain an RSA key file.
 
   def key= key
-    @agent.key = key
+    @agent.private_key = key
   end
 
   ##
@@ -918,6 +1100,21 @@ class Mechanize
   def pass= pass
     @agent.pass = pass
   end
+
+  ##
+  # SSL version to use.  Ruby 1.9 and newer only.
+
+  def ssl_version
+    @agent.ssl_version
+  end if RUBY_VERSION > '1.9'
+
+  ##
+  # Sets the SSL version to use to +version+ without client/server
+  # negotiation.  Ruby 1.9 and newer only.
+
+  def ssl_version= ssl_version
+    @agent.ssl_version = ssl_version
+  end if RUBY_VERSION > '1.9'
 
   ##
   # A callback for additional certificate verification.  See
@@ -958,8 +1155,6 @@ class Mechanize
 
   attr_reader :agent # :nodoc:
 
-  attr_reader :pluggable_parser # :nodoc:
-
   ##
   # Parses the +body+ of the +response+ from +uri+ using the pluggable parser
   # that matches its content type
@@ -972,7 +1167,6 @@ class Mechanize
       content_type, = data.downcase.split ',', 2 unless data.nil?
     end
 
-    # Find our pluggable parser
     parser_klass = @pluggable_parser.parser content_type
 
     unless parser_klass <= Mechanize::Download then
@@ -1011,7 +1205,6 @@ class Mechanize
     @proxy_pass = password
 
     @agent.set_proxy address, port, user, password
-    @agent.set_http
   end
 
   private
@@ -1021,7 +1214,7 @@ class Mechanize
 
   def post_form(uri, form, headers = {})
     cur_page = form.page || current_page ||
-      Page.new(nil, {'content-type'=>'text/html'})
+      Page.new
 
     request_data = form.request_data
 
@@ -1048,11 +1241,14 @@ class Mechanize
 
 end
 
+require 'mechanize/response_read_error'
+require 'mechanize/chunked_termination_error'
 require 'mechanize/content_type_error'
 require 'mechanize/cookie'
 require 'mechanize/cookie_jar'
 require 'mechanize/parser'
 require 'mechanize/download'
+require 'mechanize/directory_saver'
 require 'mechanize/file'
 require 'mechanize/file_connection'
 require 'mechanize/file_request'
@@ -1065,15 +1261,15 @@ require 'mechanize/http/auth_challenge'
 require 'mechanize/http/auth_realm'
 require 'mechanize/http/content_disposition_parser'
 require 'mechanize/http/www_authenticate_parser'
+require 'mechanize/image'
 require 'mechanize/page'
 require 'mechanize/monkey_patch'
 require 'mechanize/pluggable_parsers'
 require 'mechanize/redirect_limit_reached_error'
 require 'mechanize/redirect_not_get_or_head_error'
 require 'mechanize/response_code_error'
-require 'mechanize/unauthorized_error'
-require 'mechanize/response_read_error'
 require 'mechanize/robots_disallowed_error'
+require 'mechanize/unauthorized_error'
 require 'mechanize/unsupported_scheme_error'
 require 'mechanize/util'
 

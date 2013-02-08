@@ -179,14 +179,46 @@ class TestMechanizeCookie < Mechanize::TestCase
     assert !cookie.for_domain?
   end
 
-  def test_parse_expires_session
-    cookie = 'PRETANET=TGIAqbFXtt; Name=/PRETANET; Path=/; Max-Age=1.2; Content-type=text/html; Domain=192.168.6.196; expires=;'
-
+  def test_parse_max_age
     url = URI.parse('http://localhost/')
 
-    cookie = Mechanize::Cookie.parse(url, cookie).first
+    date = 'Mon, 19 Feb 2012 19:26:04 GMT'
 
-    assert cookie.session
+    cookie = Mechanize::Cookie.parse(url, "name=Akinori; expires=#{date}").first
+    assert_equal Time.at(1329679564), cookie.expires
+
+    cookie = Mechanize::Cookie.parse(url, 'name=Akinori; max-age=3600').first
+    assert_in_delta Time.now + 3600, cookie.expires, 1
+
+    # Max-Age has precedence over Expires
+    cookie = Mechanize::Cookie.parse(url, "name=Akinori; max-age=3600; expires=#{date}").first
+    assert_in_delta Time.now + 3600, cookie.expires, 1
+
+    cookie = Mechanize::Cookie.parse(url, "name=Akinori; expires=#{date}; max-age=3600").first
+    assert_in_delta Time.now + 3600, cookie.expires, 1
+  end
+
+  def test_parse_expires_session
+    url = URI.parse('http://localhost/')
+
+    [
+      'name=Akinori',
+      'name=Akinori; expires',
+      'name=Akinori; max-age',
+      'name=Akinori; expires=',
+      'name=Akinori; max-age=',
+    ].each { |str|
+      cookie = Mechanize::Cookie.parse(url, str).first
+      assert cookie.session, str
+    }
+
+    [
+      'name=Akinori; expires=Mon, 19 Feb 2012 19:26:04 GMT',
+      'name=Akinori; max-age=3600',
+    ].each { |str|
+      cookie = Mechanize::Cookie.parse(url, str).first
+      assert !cookie.session, str
+    }
   end
 
   def test_parse_many
@@ -199,10 +231,15 @@ class TestMechanizeCookie < Mechanize::TestCase
       "nojs=NoJS; Domain=localhost; Path=/; HttpOnly, " \
       "expired=doh; Expires=Fri, 04 Nov 2011 00:29:51 GMT; Path=/, " \
       "a_path=some_path; Expires=Sun, 06 Nov 2011 00:29:51 GMT; Path=/some_path, " \
-      "no_path=no_path; Expires=Sun, 06 Nov 2011 00:29:51 GMT, no_expires=nope; Path=/"
+      "no_path1=no_path; Expires=Sun, 06 Nov 2011 00:29:52 GMT, no_expires=nope; Path=/, " \
+      "no_path2=no_path; Expires=Sun, 06 Nov 2011 00:29:52 GMT; no_expires=nope; Path, " \
+      "no_path3=no_path; Expires=Sun, 06 Nov 2011 00:29:52 GMT; no_expires=nope; Path=, " \
+      "no_domain1=no_domain; Expires=Sun, 06 Nov 2011 00:29:53 GMT; no_expires=nope, " \
+      "no_domain2=no_domain; Expires=Sun, 06 Nov 2011 00:29:53 GMT; no_expires=nope; Domain, " \
+      "no_domain3=no_domain; Expires=Sun, 06 Nov 2011 00:29:53 GMT; no_expires=nope; Domain="
 
     cookies = Mechanize::Cookie.parse url, cookie_str
-    assert_equal 9, cookies.length
+    assert_equal 14, cookies.length
 
     name = cookies.find { |c| c.name == 'name' }
     assert_equal "Aaron",             name.value
@@ -225,10 +262,20 @@ class TestMechanizeCookie < Mechanize::TestCase
     assert_equal "/",    no_expires.path
     assert_nil           no_expires.expires
 
-    no_path = cookies.find { |c| c.name == 'no_path' }
-    assert_equal "no_path",           no_path.value
-    assert_equal "/",                 no_path.path
-    assert_equal Time.at(1320539391), no_path.expires
+    no_path_cookies = cookies.select { |c| c.value == 'no_path' }
+    assert_equal 3, no_path_cookies.size
+    no_path_cookies.each { |c|
+      assert_equal "/",                 c.path,    c.name
+      assert_equal Time.at(1320539392), c.expires, c.name
+    }
+
+    no_domain_cookies = cookies.select { |c| c.value == 'no_domain' }
+    assert_equal 3, no_domain_cookies.size
+    no_domain_cookies.each { |c|
+      assert !c.for_domain?, c.name
+      assert_equal c.domain, url.host, c.name
+      assert_equal Time.at(1320539393), c.expires, c.name
+    }
 
     assert cookies.find { |c| c.name == 'expired' }
   end
